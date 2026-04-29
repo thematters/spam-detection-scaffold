@@ -4,6 +4,7 @@
 介於 0 到 1 之間的分數，分數越高代表越可能是無效內容。
 
 
+
 ## Tech Stack
 
 - 整體採用 AWS Lambda 容器映像搭配 API Gateway，透過 AWS SAM 進行管理與部署。
@@ -12,6 +13,8 @@
 - 推論執行時使用 PyTorch CPU 版本。
 - 訓練流程以 Jupyter notebook 完成，涵蓋資料處理、模型訓練、LoRA 合併與評估。
 - 文字前處理使用 html2text，將 HTML 內容轉為純文字。
+
+
 
 ## Project Structure
 
@@ -32,6 +35,8 @@
     - 訓練模型的 Jupyter notebook，依編號順序執行，總共五份檔案，從資料合併
       到模型評估。
 
+
+
 ## Get Started
 
 1. 進入 trains/spam/ 目錄，依編號順序執行 notebook：0.1 合併標籤、0.2 資料
@@ -45,7 +50,9 @@
 5. 部署完成後，從 CloudFormation stack 的輸出取得 InferenceApi 的 URL，將文字
    內容以 POST 方式送至 /spam/infer/，回應 JSON 中的 score 欄位即為判斷分數。
 
-## API 範例
+
+
+## API Example
 
 部署完成後，可以直接以 curl 將文章內容透過 POST 送往端點：
 
