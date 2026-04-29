@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  SpamModelTarUrl:
+    Description: URL to Spam model tar file
+    Type: String
+  LambdaRoleArn:
+    Description: Lambda Role ARN
+    Type: String
+
+Globals:
+  Function:
+    Timeout: 900
+    MemorySize: 3000
+
+Resources:
+  SpamInfer:
+    Type: AWS::Serverless::Function
+    Properties:
+      Role:
+        Ref: LambdaRoleArn
+      PackageType: Image
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          HF_HOME: '/tmp/'
+      Events:
+        Inference:
+          Type: Api
+          Properties:
+            Path: /spam/infer/
+            Method: post
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: ./spam
+      DockerTag: 0.1
+      DockerBuildArgs:
+        MODEL_TAR_URL:
+          Ref: SpamModelTarUrl
+
+Outputs:
+  InferenceApi:
+    Description: "Inference API base URL"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  SpamFunction:
+    Description: "Inference Lambda Function ARN"
+    Value: !GetAtt SpamInfer.Arn
