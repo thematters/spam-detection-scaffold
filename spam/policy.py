@@ -1,3 +1,5 @@
+import hashlib
+import math
 import re
 from dataclasses import asdict, dataclass
 from typing import Literal
@@ -13,6 +15,10 @@ SignalType = Literal[
 
 LOW_CONFIDENCE_THRESHOLD = 0.35
 HIGH_CONFIDENCE_THRESHOLD = 0.85
+LLM_REVIEW_MODEL = "llm-review-small"
+LLM_OUTPUT_TOKEN_BUDGET = 220
+LLM_INPUT_USD_PER_1M_TOKENS = 0.40
+LLM_OUTPUT_USD_PER_1M_TOKENS = 1.60
 
 FIRST_PARTY_DOMAINS = {
     "matters.town",
@@ -33,14 +39,18 @@ class SpamPolicyDecision:
     llm_review: bool
     reason: str
     signals: list[SpamSignal]
+    llm: dict | None = None
 
     def to_dict(self):
-        return {
+        payload = {
             "decision": self.decision,
             "llmReview": self.llm_review,
             "reason": self.reason,
             "signals": [asdict(signal) for signal in self.signals],
         }
+        if self.llm is not None:
+            payload["llm"] = self.llm
+        return payload
 
 
 def _normalize_text(text: str) -> str:
@@ -49,6 +59,66 @@ def _normalize_text(text: str) -> str:
 
 def _normalize_contact_value(raw: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "", raw).lower()
+
+
+def estimate_token_count(text: str) -> int:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return 0
+    return max(1, math.ceil(len(normalized) / 4))
+
+
+def build_pattern_cache_key(text: str, signals: list[SpamSignal]) -> str:
+    signal_part = "|".join(
+        f"{signal.type}:{signal.value}"
+        for signal in sorted(signals, key=lambda s: (s.type, s.value))
+    )
+    normalized = _normalize_text(text)
+    compact = re.sub(r"[^\w]+", "", normalized)[:160]
+    raw_key = f"{signal_part}|{compact}"
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def build_llm_review_plan(score: float, text: str, signals: list[SpamSignal]) -> dict:
+    estimated_input_tokens = estimate_token_count(text)
+    estimated_output_tokens = LLM_OUTPUT_TOKEN_BUDGET
+    estimated_cost_usd = (
+        estimated_input_tokens * LLM_INPUT_USD_PER_1M_TOKENS
+        + estimated_output_tokens * LLM_OUTPUT_USD_PER_1M_TOKENS
+    ) / 1_000_000
+
+    return {
+        "model": LLM_REVIEW_MODEL,
+        "patternCacheKey": build_pattern_cache_key(text, signals),
+        "estimatedInputTokens": estimated_input_tokens,
+        "estimatedOutputTokens": estimated_output_tokens,
+        "estimatedCostUsd": round(estimated_cost_usd, 6),
+        "request": {
+            "score": score,
+            "signals": [asdict(signal) for signal in signals],
+        },
+        "responseSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["decision", "confidence", "reason", "matchedSignals"],
+            "properties": {
+                "decision": {"enum": ["allow", "review", "block"]},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "reason": {"type": "string"},
+                "matchedSignals": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["type", "value"],
+                        "properties": {
+                            "type": {"type": "string"},
+                            "value": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    }
 
 
 def extract_spam_signals(text: str) -> list[SpamSignal]:
@@ -120,4 +190,5 @@ def decide_spam_policy(score: float, text: str) -> SpamPolicyDecision:
         llm_review=True,
         reason="gray_zone_or_spam_signals_require_review",
         signals=signals,
+        llm=build_llm_review_plan(score, text, signals),
     )

@@ -87,3 +87,37 @@ curl -X POST https://<api-id>.execute-api.<region>.amazonaws.com/Prod/spam/infer
 
 `llmReview` 只代表「建議進入 LLM 覆核佇列」，目前不會在 Lambda 內呼叫外部 LLM API。
 這個設計保留既有低成本推論路徑，也讓後續導入 LLM 時可以只處理少量灰區內容。
+
+灰區回應會額外包含 `llm` 物件，讓後續 queue worker 或人工覆核使用固定 schema。
+
+```
+{
+  "score": 0.52,
+  "decision": "review",
+  "llmReview": true,
+  "reason": "gray_zone_or_spam_signals_require_review",
+  "signals": [
+    { "type": "external_url", "value": "spam.example" }
+  ],
+  "llm": {
+    "model": "llm-review-small",
+    "patternCacheKey": "<sha256>",
+    "estimatedInputTokens": 120,
+    "estimatedOutputTokens": 220,
+    "estimatedCostUsd": 0.0004,
+    "request": {
+      "score": 0.52,
+      "signals": [
+        { "type": "external_url", "value": "spam.example" }
+      ]
+    },
+    "responseSchema": {
+      "required": ["decision", "confidence", "reason", "matchedSignals"]
+    }
+  }
+}
+```
+
+`patternCacheKey` 只根據正規化後的文字摘要與 signals 產生，不需要把完整垃圾留言寫進
+快取 key。實際 LLM worker 應先查這個 key，有命中就重用前一次覆核結果，沒命中才送
+LLM，並要求回覆符合 `responseSchema`。
