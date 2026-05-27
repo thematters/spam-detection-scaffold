@@ -64,5 +64,26 @@ curl -X POST https://<api-id>.execute-api.<region>.amazonaws.com/Prod/spam/infer
 回應為 JSON 格式，分數越接近 1 代表越可能是無效內容：
 
 ```
-{"score": 0.987}
+{
+  "score": 0.987,
+  "decision": "block",
+  "llmReview": false,
+  "reason": "local_model_high_confidence_with_spam_signals",
+  "signals": [
+    { "type": "contact_handle", "value": "abc1234" }
+  ]
+}
 ```
+
+## Hybrid LLM Review Policy
+
+現有本地模型仍是第一關，用來控制成本與延遲。新增的 policy layer 會根據模型分數與
+明確廣告訊號輸出三種決策：
+
+- `allow`: 分數低且沒有外部連結或聯絡方式訊號。
+- `review`: 分數位於灰區，或偵測到外部連結、變形聯絡方式、成人服務用語。這類才適合送
+  LLM 或人工覆核。
+- `block`: 分數高且同時有高風險訊號，可作為自動攔截或小黑屋候選。
+
+`llmReview` 只代表「建議進入 LLM 覆核佇列」，目前不會在 Lambda 內呼叫外部 LLM API。
+這個設計保留既有低成本推論路徑，也讓後續導入 LLM 時可以只處理少量灰區內容。

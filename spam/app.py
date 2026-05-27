@@ -5,6 +5,7 @@ import html2text
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoConfig
 
 from infer import infer
+from policy import decide_spam_policy
 
 
 h = html2text.HTML2Text()
@@ -32,15 +33,19 @@ def _split_group_lines(text, tokens = 2000):
 
 
 def lambda_handler(event, context):
-    texts = _split_group_lines(h.handle(event['body']))
+    text = h.handle(event['body'])
+    texts = _split_group_lines(text)
     scores = infer(texts)
+    score = max(scores) if scores else 0
+    policy = decide_spam_policy(score, text)
     print('version: ', os.environ.get('AWS_LAMBDA_FUNCTION_VERSION'))
     print('scores: ', scores)
     return {
         'statusCode': 200,
         'body': json.dumps(
             {
-                "score": max(scores),
+                "score": score,
+                **policy.to_dict(),
             }
         )
     }
