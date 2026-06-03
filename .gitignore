@@ -11,4 +11,5 @@ trains/spam/baseline-metrics.csv
 # Model build artifacts
 *.tar
 merged_*/
+build_model/
 .cache/

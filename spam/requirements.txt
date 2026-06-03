@@ -2,4 +2,6 @@
 --extra-index-url https://pypi.org/simple
 torch==2.5.1
 transformers==4.46.2
+sentence-transformers==3.3.1
+numpy==1.26.4
 html2text==2024.2.26

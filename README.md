@@ -66,3 +66,31 @@ curl -X POST https://<api-id>.execute-api.<region>.amazonaws.com/Prod/spam/infer
 ```
 {"score": 0.987}
 ```
+
+
+
+## Comment Model（留言 spam）
+
+原管線針對「文章」訓練。留言（comment）spam 另起一套，因為現役文章模型套到留言
+recall 僅 ~0.68（漏掉約 1/3 已被守望相助隊移除的留言 spam）。
+
+留言模型不走 LoRA：留言 spam 高度模板化，一個 **e5-small embedding + logistic
+regression head** 在「未見模板」的 leave-one-family-out 評估上即達 recall ~0.88、
+誤殺（over-kill）僅 ~0.33%，且可在筆電 CPU 上幾秒訓完。
+
+`trains/spam/` 內的留言腳本（依序）：
+
+1. `harvest_community_watch.py` — 從公開 `communityWatchActions` 取**正樣本**
+   （已移除的留言），以 contentHash 當 template-family。
+2. `harvest_normal_comments.py` — 從公開 `search → Article.comments` 取**負樣本**
+   （正常留言），排除已被守望相助隊處理者。
+3. `build_comment_dataset.py` — 合併正負樣本，html2text 去標籤，做
+   **family-grouped** train/holdout 切分（避免模板洩漏）。
+4. `cheap_baselines.py` / `cv_eval.py` — 便宜優先 baseline 與 leave-one-family-out
+   穩健評估。
+5. `train_comment_head.py` — 用全資料訓練最終 logreg head，匯出可部署 tar
+   （`./model/` 內含 SentenceTransformer + `head.json`）。
+
+部署沿用既有流程：上傳 tar → `sam build --parameter-overrides SpamModelTarUrl=...`
+→ `sam deploy`。推論端（`spam/infer.py`）載入 SentenceTransformer 並以 numpy 套用
+logreg head，runtime 不需 sklearn。`baseline_lambda.py` 量測現役模型基準。
