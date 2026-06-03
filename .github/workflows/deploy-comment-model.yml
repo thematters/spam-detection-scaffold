@@ -4,14 +4,17 @@ name: deploy-comment-model
 # Lambda stack -- separate from the article model's `spam-model-service`, so the
 # two never clobber each other. Manual only.
 #
-# Prerequisites (one-time):
-#   1. Train + export the artifact locally:
+# Auth: GitHub OIDC (no long-lived AWS keys stored in the repo). The job exchanges
+# a short-lived GitHub OIDC token for the deploy role via STS.
+#
+# Prerequisites (one-time, done by an AWS admin -- see infra/oidc/ in this PR):
+#   1. Create the GitHub OIDC provider + deploy role (infra/oidc/setup.sh).
+#   2. Set the repo VARIABLE (not secret) AWS_DEPLOY_ROLE_ARN to that role's ARN
+#        (Settings -> Secrets and variables -> Actions -> Variables).
+#   3. Train + export the artifact and upload to S3:
 #        python trains/spam/train_comment_head.py   # -> spam_comment_e5.tar
-#   2. Upload it to S3 (any bucket the deploy role can read):
 #        aws s3 cp trains/spam/spam_comment_e5.tar s3://<bucket>/comment-model/spam_comment_e5.tar
-#   3. Add repo Secrets:
-#        AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY   (deployer creds)
-#      and run this workflow with model_s3_uri pointing at the object above.
+#      then run this workflow with model_s3_uri pointing at the object.
 #
 # The Dockerfile fetches the tar via ADD <url>; we presign the S3 object at
 # deploy time so the build can read it without making the bucket public.
@@ -32,6 +35,10 @@ on:
         description: "Lambda execution role ARN"
         default: arn:aws:iam::903380195283:role/spam-detection-serverless-InferRole-87uW1ijDhq6O
 
+permissions:
+  id-token: write   # required for OIDC token
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -42,11 +49,10 @@ jobs:
           python-version: "3.12"
       - name: Install SAM CLI
         run: pip install aws-sam-cli
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ github.event.inputs.region }}
       - name: Presign model tar URL
         id: presign
