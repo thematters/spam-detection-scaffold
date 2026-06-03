@@ -1,0 +1,79 @@
+name: deploy-comment-model
+
+# Builds and deploys the COMMENT spam model (e5-small + logreg head) as its own
+# Lambda stack -- separate from the article model's `spam-model-service`, so the
+# two never clobber each other. Manual only.
+#
+# Prerequisites (one-time):
+#   1. Train + export the artifact locally:
+#        python trains/spam/train_comment_head.py   # -> spam_comment_e5.tar
+#   2. Upload it to S3 (any bucket the deploy role can read):
+#        aws s3 cp trains/spam/spam_comment_e5.tar s3://<bucket>/comment-model/spam_comment_e5.tar
+#   3. Add repo Secrets:
+#        AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY   (deployer creds)
+#      and run this workflow with model_s3_uri pointing at the object above.
+#
+# The Dockerfile fetches the tar via ADD <url>; we presign the S3 object at
+# deploy time so the build can read it without making the bucket public.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_s3_uri:
+        description: "s3://bucket/key of the model tar"
+        required: true
+      stack_name:
+        description: "CloudFormation stack name"
+        default: spam-comment-model-service
+      region:
+        description: "AWS region"
+        default: ap-southeast-1
+      lambda_role_arn:
+        description: "Lambda execution role ARN"
+        default: arn:aws:iam::903380195283:role/spam-detection-serverless-InferRole-87uW1ijDhq6O
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ github.event.inputs.region }}
+      - name: Presign model tar URL
+        id: presign
+        run: |
+          url="$(aws s3 presign '${{ github.event.inputs.model_s3_uri }}' --expires-in 3600)"
+          echo "::add-mask::$url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+      - name: SAM build
+        run: |
+          sam build \
+            --parameter-overrides \
+              "SpamModelTarUrl=${{ steps.presign.outputs.url }}" \
+              "LambdaRoleArn=${{ github.event.inputs.lambda_role_arn }}"
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name "${{ github.event.inputs.stack_name }}" \
+            --region "${{ github.event.inputs.region }}" \
+            --resolve-s3 --resolve-image-repos \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-confirm-changeset --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "SpamModelTarUrl=${{ steps.presign.outputs.url }}" \
+              "LambdaRoleArn=${{ github.event.inputs.lambda_role_arn }}"
+      - name: Show endpoint
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "${{ github.event.inputs.stack_name }}" \
+            --region "${{ github.event.inputs.region }}" \
+            --query "Stacks[0].Outputs" --output table
