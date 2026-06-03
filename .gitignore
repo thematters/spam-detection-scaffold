@@ -1,0 +1,14 @@
+# Python envs
+.venv*/
+__pycache__/
+*.pyc
+
+# Local data artifacts (regenerable; may contain production content — do NOT commit)
+trains/spam/*.parquet.gzip
+trains/spam/*.scores.json
+trains/spam/baseline-metrics.csv
+
+# Model build artifacts
+*.tar
+merged_*/
+.cache/
