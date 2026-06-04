@@ -1,0 +1,66 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudFormation",
+      "Effect": "Allow",
+      "Action": ["cloudformation:*"],
+      "Resource": [
+        "arn:aws:cloudformation:ap-southeast-1:903380195283:stack/spam-comment-model-service/*",
+        "arn:aws:cloudformation:ap-southeast-1:aws:transform/Serverless-2016-10-31"
+      ]
+    },
+    {
+      "Sid": "Lambda",
+      "Effect": "Allow",
+      "Action": ["lambda:*"],
+      "Resource": "arn:aws:lambda:ap-southeast-1:903380195283:function:spam-comment-model-service*"
+    },
+    {
+      "Sid": "ApiGateway",
+      "Effect": "Allow",
+      "Action": ["apigateway:*"],
+      "Resource": "arn:aws:apigateway:ap-southeast-1::*"
+    },
+    {
+      "Sid": "EcrAuth",
+      "Effect": "Allow",
+      "Action": ["ecr:GetAuthorizationToken"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrPush",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:CreateRepository",
+        "ecr:DescribeRepositories",
+        "ecr:SetRepositoryPolicy",
+        "ecr:GetRepositoryPolicy",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage",
+        "ecr:BatchGetImage",
+        "ecr:TagResource"
+      ],
+      "Resource": "arn:aws:ecr:ap-southeast-1:903380195283:repository/*"
+    },
+    {
+      "Sid": "PassLambdaExecRole",
+      "Effect": "Allow",
+      "Action": ["iam:PassRole", "iam:GetRole"],
+      "Resource": "arn:aws:iam::903380195283:role/spam-detection-serverless-InferRole-87uW1ijDhq6O"
+    },
+    {
+      "Sid": "S3SamAndModel",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:GetBucketLocation", "s3:ListBucket", "s3:CreateBucket", "s3:PutBucketPolicy", "s3:PutObjectTagging"],
+      "Resource": [
+        "arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-8jnezd3nhz9w",
+        "arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-8jnezd3nhz9w/*"
+      ]
+    }
+  ]
+}

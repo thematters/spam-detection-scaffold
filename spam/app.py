@@ -1,8 +1,6 @@
 import os
 import json
-import torch
 import html2text
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoConfig
 
 from infer import infer
 
