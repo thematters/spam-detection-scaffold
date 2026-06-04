@@ -29,8 +29,25 @@ def _split_group_lines(text, tokens = 2000):
 
 
 
+def _extract_text(body):
+    """Accept either a raw text/HTML body or matters-server's JSON {"text": ...}.
+
+    The matters-server SpamDetector posts JSON {text}; ad-hoc callers (curl) post
+    raw text. Support both so the same endpoint works for the backend and tests.
+    """
+    if not body:
+        return ""
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict) and "text" in parsed:
+            return parsed["text"] or ""
+    except (ValueError, TypeError):
+        pass
+    return body
+
+
 def lambda_handler(event, context):
-    texts = _split_group_lines(h.handle(event['body']))
+    texts = _split_group_lines(h.handle(_extract_text(event['body'])))
     scores = infer(texts)
     print('version: ', os.environ.get('AWS_LAMBDA_FUNCTION_VERSION'))
     print('scores: ', scores)
