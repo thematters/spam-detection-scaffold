@@ -2,19 +2,16 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "CloudFormation",
+      "Sid": "CloudFormationSamDeploy",
       "Effect": "Allow",
       "Action": ["cloudformation:*"],
-      "Resource": [
-        "arn:aws:cloudformation:ap-southeast-1:903380195283:stack/spam-comment-model-service/*",
-        "arn:aws:cloudformation:ap-southeast-1:aws:transform/Serverless-2016-10-31"
-      ]
+      "Resource": "*"
     },
     {
       "Sid": "Lambda",
       "Effect": "Allow",
       "Action": ["lambda:*"],
-      "Resource": "arn:aws:lambda:ap-southeast-1:903380195283:function:spam-comment-model-service*"
+      "Resource": "*"
     },
     {
       "Sid": "ApiGateway",
@@ -54,9 +51,9 @@
       "Resource": "arn:aws:iam::903380195283:role/spam-detection-serverless-InferRole-87uW1ijDhq6O"
     },
     {
-      "Sid": "S3SamAndModel",
+      "Sid": "S3SamManagedBucket",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:GetBucketLocation", "s3:ListBucket", "s3:CreateBucket", "s3:PutBucketPolicy", "s3:PutObjectTagging"],
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:GetBucketLocation", "s3:ListBucket", "s3:CreateBucket", "s3:PutBucketPolicy", "s3:PutObjectTagging", "s3:GetBucketPolicy"],
       "Resource": [
         "arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-8jnezd3nhz9w",
         "arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-8jnezd3nhz9w/*"
