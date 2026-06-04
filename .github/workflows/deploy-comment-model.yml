@@ -33,7 +33,7 @@ on:
         default: ap-southeast-1
       lambda_role_arn:
         description: "Lambda execution role ARN"
-        default: arn:aws:iam::903380195283:role/spam-detection-serverless-InferRole-87uW1ijDhq6O
+        default: arn:aws:iam::903380195283:role/service-role/spam-detection-role-ot57al3z
 
 permissions:
   id-token: write   # required for OIDC token
