@@ -22,7 +22,8 @@ s3_prefix = "spam-model-service"
 region = "ap-southeast-1"
 stack_name = "spam-model-service"
 disable_rollback = true
-profile = "default"
+# No `profile` here: use the default credential chain so CI (GitHub OIDC env
+# creds) works. Pass `--profile <name>` explicitly for a local named profile.
 # 替換 LambdaRoleArn 為自己 AWS 帳號中已建立的 Lambda 執行角色 ARN
 parameter_overrides = "SpamModelTarUrl=\"\" LambdaRoleArn=\"arn:aws:iam::123456789012:role/your-lambda-execution-role\""
 
