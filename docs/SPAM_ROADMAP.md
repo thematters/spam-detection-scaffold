@@ -24,7 +24,12 @@
 - 獨立 staging stack `article-spam-conformal-staging`，**絕不碰** prod stack `article-spam-model-v20251229`。
 - 旋鈕 `CONFORMAL_EPS`(0.02)、`CONFORMAL_CALIB` 走 env。calib 重建法見 `spam-detection-serverless` README / 專案記憶。
 - 驗收：staging 上跑 shadow eval，確認誤殺率/佇列率符合預期再談 prod。
-- 依賴（需 ops/admin）：repo 的 OIDC role + secrets、staging stack 建立。
+- ✅ 已部署 staging（`article-spam-conformal-staging`，endpoint `fjrmugbg5j`），tar 已驗證與 prod 同（Δ score=0）。
+- ⚠️ **驗收尚未通過**：in-sample 首跑（eval/staging_conformal_accept.py，100+100）ham block≈97%，但這是
+  訓練集 ham 標籤雜訊（大量純圖片無文字文章 granite≈1.0）+ 504 冷啟動污染所致，**非真實誤殺率**。
+  正式驗收需 read-replica 乾淨 held-out ham + 過濾低文字文章 + 低並發。**未過驗收前不可上 prod。**
+- 依賴（需 ops/admin）：~~repo 的 OIDC role + secrets、staging stack~~ ✅ 已由 session 用 AWS 代設並部署。
+  正式驗收需 read-replica 存取（held-out 文章）。
 
 ### A — conformal 帶到留言模型 endpoint（bot 消費）
 - 留言模型（scaffold）目前只回 `{score}`。需移植 conformal 三件套 + 重建**留言**calib + 重部署。
