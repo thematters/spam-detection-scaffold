@@ -59,9 +59,16 @@
     的 originalContent（被推翻的處置＝誤殺，專治 ham 稀少/受保護 1%）。
 - 去識別化後 append 到 S3 訓練桶。SQL 見 `sql/extract_spam_training_incremental.sql`。
 
-### L2 — 主動快照（防硬刪除）— 見下方「快照儲存建議」
+### L2 — 主動快照（防硬刪除）— 見下方「快照儲存建議」— code ✅
 - 處置事件當下寫一筆去識別化樣本，與 live 內容生命週期解耦。
-- 觸發點：`communityWatchRemoveComment`、`archiveUsers`/ban、報告折疊、`clearCommunityWatchOriginalContent`（清除前先存）。
+- 發送端（matters-server PR feat/spam-training-sample-capture）：`common/notifications/spamSample.ts`
+  `enqueueSpamSample`（best-effort SQS，emit 端就 HMAC 去識別 id，PII 不進佇列）。已 wire
+  `communityWatchRemoveComment`（移除即存 spam）、`clearCommunityWatchOriginalContent`（清除前存；
+  reversed→hard-negative ham）。env `MATTERS_AWS_SPAM_SAMPLE_QUEUE_URL` / `MATTERS_SPAM_SAMPLE_HASH_SALT`。
+- 消費端（scaffold `workers/spam_sample_worker.py`）：SQS→S3 Lambda，date-partition JSONL，
+  key 含 messageId 做冪等。離線單測過。
+- 待 ops：建 SQS 佇列 + salt secret + 部署 worker Lambda（SQS trigger + s3:PutObject）。
+- 後續觸發點（未 wire，L1 已涵蓋或次要）：`archiveUsers`/ban 批次、留言 auto-collapse(#4843)。
 
 ### L3 — 標籤品質 + 隱私治理
 - 排除被推翻處置（appeal upheld / review reversed / 誤殺駁回）出正樣本，改入 hard-negative。
