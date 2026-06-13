@@ -70,11 +70,13 @@
 - 待 ops：建 SQS 佇列 + salt secret + 部署 worker Lambda（SQS trigger + s3:PutObject）。
 - 後續觸發點（未 wire，L1 已涵蓋或次要）：`archiveUsers`/ban 批次、留言 auto-collapse(#4843)。
 
-### L3 — 標籤品質 + 隱私治理
-- 排除被推翻處置（appeal upheld / review reversed / 誤殺駁回）出正樣本，改入 hard-negative。
-- 樣本只留模型所需文字 + label + metadata（reason/score/時間/salted hash id），**不留可聯繫個資**。
-- 存取限訓練用途；保留期依法務指引設定（已過審）。
-- 閉環：conformal review 經人工裁決的結果 = 高價值人工標籤 → 回流 L2。
+### L3 — 標籤品質 + 隱私治理 — 組裝 code ✅
+- 組裝器 `scripts/assemble_training_set.py`（核心 `resolve()`，離線單測過）：合併 L1+L2，
+  以 comment_hash 去重，**ham 覆蓋 spam**（人工推翻優先於舊 spam 標籤），同 label 取
+  來源強度最高+最新；加 `label_weight`（人工確認=2.0 / 受限·管理員=1.0 / 純模型=0.5，壓低誤殺）。
+- 去識別已在 L1/L2 來源端完成（HMAC id、無可聯繫個資）；組裝器只處理已去識別資料。
+- 待治理：保留期具體天數（法務，方向已過審）；存取限訓練用途。
+- 閉環：conformal review 經人工裁決的結果 = 高價值人工標籤 → 回流 L2 → 組裝器以高 weight 納入。
 
 ---
 
