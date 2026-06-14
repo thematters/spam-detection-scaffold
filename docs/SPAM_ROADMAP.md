@@ -67,7 +67,13 @@
   reversed→hard-negative ham）。env `MATTERS_AWS_SPAM_SAMPLE_QUEUE_URL` / `MATTERS_SPAM_SAMPLE_HASH_SALT`。
 - 消費端（scaffold `workers/spam_sample_worker.py`）：SQS→S3 Lambda，date-partition JSONL，
   key 含 messageId 做冪等。離線單測過。
-- 待 ops：建 SQS 佇列 + salt secret + 部署 worker Lambda（SQS trigger + s3:PutObject）。
+- ✅ AWS 基礎建設已建好並 smoke-test 通過（2026-06-14，本 session 代建）：
+  - S3 桶 `matters-spam-training-samples`（ap-southeast-1，封鎖公開、lifecycle 365 天到期）
+  - SQS `matters-spam-sample` + DLQ `matters-spam-sample-dlq`（5 次重試後進 DLQ）
+  - Lambda `matters-spam-sample-worker`（role `matters-spam-sample-worker`，SQS 觸發 batch 10）
+  - SSM：`/{prod,dev}/matters-server/MATTERS_AWS_SPAM_SAMPLE_QUEUE_URL` + `..._HASH_SALT`(SecureString) 已設
+  - 驗證：丟測試訊息 → worker → S3 寫入成功（測試物件已清）
+  - **就緒,只待 matters-server #4846 merge + 部署**,prod 才開始真的擷取。
 - 後續觸發點（未 wire，L1 已涵蓋或次要）：`archiveUsers`/ban 批次、留言 auto-collapse(#4843)。
 
 ### L3 — 標籤品質 + 隱私治理 — 組裝 code ✅
@@ -101,7 +107,12 @@
 ---
 
 ## 依賴 / 待外部
-- ops/admin：serverless repo OIDC role + secrets、staging stack、S3 訓練桶 + SQS 佇列 + Lambda worker IAM。
+- ✅ AWS 基礎建設（OIDC、staging stack、S3 桶、SQS、worker）全部本 session 代建完成。
+- **step 1（read-replica 內網存取）VPC 資訊已查到**（2026-06-14）：
+  - VPC `vpc-02362a4fe3806ffac`（prod）；分析用 replica `matters-prod-replica-analysis`（與線上隔離,適合抽取/驗收）
+  - 子網 subnet-0b011dd1ca64fa0a1 / subnet-08074bc162cd5a4a3 / subnet-0415147ddf68a48f2；DB SG `sg-0aff7c791291d103d`(5432)
+  - 連線字串在 SSM `/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING`
+  - L1 匯出 + conformal 正式驗收須改成「VPC 內」執行（VPC Lambda 或 VPC runner）才連得到 replica；GitHub-hosted runner 不在 VPC。
 - ✅ 法務：保留期 = 1 年（365 天，2026-06-14 拍板）。建桶時設 S3 lifecycle 365 天。
 - HF token 輪替（獨立資安項，見專案記憶）。
 
