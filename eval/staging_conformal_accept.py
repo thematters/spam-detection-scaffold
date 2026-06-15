@@ -59,9 +59,12 @@ def load_sample(parquet: str, n_ham: int, n_spam: int, seed: int):
 
 
 def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
-                        min_text_len: int, seed: int):
-    """正式驗收用：從 read-replica 撈訓練截點（id>cutoff）之後的乾淨 held-out。
-      ham  = 截點後、active、作者未受限、文字長度達標（濾掉純圖/低文字）= 真正合法樣本。
+                        min_text_len: int, seed: int, established_before: str,
+                        min_articles: int):
+    """正式驗收用：從 read-replica 撈訓練截點（id>cutoff）之後的 held-out。
+      ham  = 截點後 active、作者未受限、**老帳號（created_at < established_before）**、
+             **作者已發 ≥min_articles 篇 active 文章**、文字達標。整個 spam 模式是「新帳號→貼文」，
+             故老帳號+多產作者≈真正合法 → 才量得出真實誤殺率（v1「active+未受限」被未處置 spam 污染）。
       spam = 截點後、作者受限（小黑屋）的文章 = spam 代理正樣本。
     全程唯讀 SELECT。需 psycopg(v3)。"""
     import psycopg
@@ -73,9 +76,13 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
         FROM article a
         JOIN article_version_newest av ON av.article_id = a.id
         JOIN article_content ac        ON ac.id = av.content_id
+        JOIN "user" u                  ON u.id = a.author_id
         WHERE a.id > %(cutoff)s AND a.state = 'active'
+          AND u.created_at < %(established)s
           AND NOT EXISTS (SELECT 1 FROM user_restriction ur WHERE ur.user_id = a.author_id)
           AND length({body}) >= %(minlen)s
+          AND (SELECT count(*) FROM article a2
+               WHERE a2.author_id = a.author_id AND a2.state = 'active') >= %(minart)s
         ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
     sql_spam = f"""
         SELECT a.id, av.title, {body} AS content
@@ -89,12 +96,14 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
     with psycopg.connect(dsn, connect_timeout=20) as conn:
         with conn.cursor() as cur:
             cur.execute(sql_ham, {"cutoff": cutoff_id, "minlen": min_text_len,
+                                  "established": established_before, "minart": min_articles,
                                   "seed": str(seed), "n": n_ham})
             out += [(r[2], 0, r[0], r[1]) for r in cur.fetchall()]   # (content, label, id, title)
             cur.execute(sql_spam, {"cutoff": cutoff_id, "seed": str(seed), "n": n_spam})
             out += [(r[2], 1, r[0], r[1]) for r in cur.fetchall()]
     n0 = sum(1 for x in out if x[1] == 0)
-    print(f"replica held-out: ham={n0} spam={len(out) - n0} (id>{cutoff_id}, text≥{min_text_len})")
+    print(f"replica held-out: ham={n0}（老帳號<{established_before}、≥{min_articles}篇）"
+          f" spam={len(out) - n0} (id>{cutoff_id}, text≥{min_text_len})")
     return out
 
 
@@ -115,6 +124,10 @@ def main() -> int:
     ap.add_argument("--dsn-env", default="PG_DSN", help="--source replica 時，存 DSN 的環境變數名")
     ap.add_argument("--cutoff-id", type=int, default=1104414, help="訓練截點 article.id（v20251229）")
     ap.add_argument("--min-text-len", type=int, default=200, help="ham 最少文字長度，濾純圖/低文字")
+    ap.add_argument("--established-before", default="2025-06-01",
+                    help="clean ham 作者帳號須早於此日（老帳號≈合法；spam 全是新帳號）")
+    ap.add_argument("--min-articles", type=int, default=10,
+                    help="clean ham 作者須已發 ≥N 篇 active 文章（多產作者≈真實創作者）")
     ap.add_argument("--endpoint", required=True)
     ap.add_argument("--ham", type=int, default=150)
     ap.add_argument("--spam", type=int, default=150)
@@ -129,7 +142,8 @@ def main() -> int:
         if not dsn:
             print(f"missing DSN env {args.dsn_env}"); return 2
         samples = load_sample_replica(dsn, args.ham, args.spam,
-                                      args.cutoff_id, args.min_text_len, args.seed)
+                                      args.cutoff_id, args.min_text_len, args.seed,
+                                      args.established_before, args.min_articles)
     else:
         if not args.parquet:
             print("--source parquet requires --parquet"); return 2
