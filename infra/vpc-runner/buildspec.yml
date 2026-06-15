@@ -7,19 +7,23 @@ version: 0.2
 env:
   variables:
     JOB: "ring"          # ring | acceptance | l1
-    PG_SSM: "/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING"
+    BUCKET: "matters-spam-training-samples"
+    STAGING_ENDPOINT: "https://fjrmugbg5j.execute-api.ap-southeast-1.amazonaws.com/Prod/spam/infer/"
   parameter-store:
     PG_DSN: "/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING"
+    HASH_SALT: "/prod/matters-server/MATTERS_AWS_SPAM_SAMPLE_HASH_SALT"
 
 phases:
   install:
     runtime-versions:
       python: 3.12
     commands:
-      - pip install -q psycopg2-binary requests cloudscraper opencc-python-reimplemented
+      # psql 給 ring SQL；psycopg(v3) 給 acceptance/l1（與 export_training_samples.py 一致）
+      - (yum install -y postgresql15 || yum install -y postgresql || amazon-linux-extras install -y postgresql14) >/dev/null 2>&1 || true
+      - pip install -q "psycopg[binary]" requests cloudscraper opencc-python-reimplemented boto3 pandas pyarrow
   build:
     commands:
-      - echo "JOB=$JOB  (連線走 in-VPC replica，DSN 來自 SSM，不落地不印出)"
+      - echo "JOB=$JOB  (連線走 in-VPC replica，DSN/salt 來自 SSM，不落地不印出)"
       - |
         case "$JOB" in
           ring)
@@ -28,18 +32,19 @@ phases:
             psql "$PG_DSN" -v days="${DAYS:-30}" -v min_authors="${MIN_AUTHORS:-3}" \
                  -v new_account_days="${NEW_ACCOUNT_DAYS:-30}" \
                  -f sql/detect_spam_rings.sql --csv -o /tmp/ring_candidates.csv
-            aws s3 cp /tmp/ring_candidates.csv "s3://matters-spam-training-samples/ring-candidates/$(date +%Y-%m-%d)/candidates.csv"
+            aws s3 cp /tmp/ring_candidates.csv "s3://${BUCKET}/ring-candidates/$(date +%Y-%m-%d)/candidates.csv"
             ;;
           acceptance)
-            # 軸一 B：conformal 定論驗收，抽乾淨 held-out ham 打 staging endpoint
+            # 軸一 B：conformal 定論驗收，從 replica 撈乾淨 held-out ham 打 staging endpoint
             python eval/staging_conformal_accept.py --source replica --dsn-env PG_DSN \
-                   --out /tmp/acceptance.json
-            aws s3 cp /tmp/acceptance.json "s3://matters-spam-training-samples/conformal-acceptance/$(date +%Y-%m-%d)/result.json"
+                   --endpoint "$STAGING_ENDPOINT" --ham "${HAM:-300}" --spam "${SPAM:-150}" \
+                   --concurrency "${CONC:-3}" --out /tmp/acceptance.json
+            aws s3 cp /tmp/acceptance.json "s3://${BUCKET}/conformal-acceptance/$(date +%Y-%m-%d)/result.json"
             ;;
           l1)
-            # 軸二 L1：被動增量抽取訓練樣本
-            python scripts/export_training_samples.py --dsn-env PG_DSN \
-                   --bucket matters-spam-training-samples
+            # 軸二 L1：被動增量抽取訓練樣本（純 env 介面；salt 與 L2 同源以跨層去重）
+            PG_READONLY_CONN="$PG_DSN" EXPORT_S3_BUCKET="$BUCKET" HASH_SALT="$HASH_SALT" \
+              python scripts/export_training_samples.py
             ;;
           *) echo "unknown JOB=$JOB" && exit 1 ;;
         esac

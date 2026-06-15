@@ -35,10 +35,13 @@
       }
     },
     {
-      "Sid": "ReadReplicaDsnFromSsm",
+      "Sid": "ReadReplicaDsnAndSaltFromSsm",
       "Effect": "Allow",
       "Action": ["ssm:GetParameter", "ssm:GetParameters"],
-      "Resource": "arn:aws:ssm:ap-southeast-1:903380195283:parameter/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING"
+      "Resource": [
+        "arn:aws:ssm:ap-southeast-1:903380195283:parameter/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING",
+        "arn:aws:ssm:ap-southeast-1:903380195283:parameter/prod/matters-server/MATTERS_AWS_SPAM_SAMPLE_HASH_SALT"
+      ]
     },
     {
       "Sid": "DecryptSecureString",
