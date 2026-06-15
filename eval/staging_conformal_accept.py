@@ -54,55 +54,74 @@ def load_sample(parquet: str, n_ham: int, n_spam: int, seed: int):
     ham = df[df.is_spam == 0].sample(min(n_ham, (df.is_spam == 0).sum()), random_state=seed)
     spam = df[df.is_spam == 1].sample(min(n_spam, (df.is_spam == 1).sum()), random_state=seed)
     print(f"sampled ham={len(ham)} spam={len(spam)}")
-    return [(t, 0) for t in ham.content] + [(t, 1) for t in spam.content]
+    return ([(t, 0, None, "") for t in ham.content]
+            + [(t, 1, None, "") for t in spam.content])
 
 
 def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
-                        min_text_len: int, seed: int):
-    """正式驗收用：從 read-replica 撈訓練截點（id>cutoff）之後的乾淨 held-out。
-      ham  = 截點後、active、作者未受限、文字長度達標（濾掉純圖/低文字）= 真正合法樣本。
+                        min_text_len: int, seed: int, established_before: str,
+                        min_articles: int):
+    """正式驗收用：從 read-replica 撈訓練截點（id>cutoff）之後的 held-out。
+      ham  = 截點後 active、作者未受限、**老帳號（created_at < established_before）**、文字達標。
+             整個 spam 模式是「新帳號→貼文」，故老帳號≈真正合法 → 才量得出真實誤殺率
+             （v1「active+未受限」被未處置 spam 污染）。
       spam = 截點後、作者受限（小黑屋）的文章 = spam 代理正樣本。
-    全程唯讀 SELECT。需 psycopg(v3)。"""
+    全程唯讀 SELECT。需 psycopg(v3)。⚠️ replica 上避免昂貴查詢（會被 WAL replay 以
+    SerializationFailure 取消）——故不用每列子查詢（如作者文章數），只靠帳號年齡這個快又乾淨的訊號。"""
+    import time as _t
     import psycopg
 
     body = ("regexp_replace(coalesce(av.title,'') || ' ' || coalesce(ac.content,''), "
             "'<[^>]+>', ' ', 'g')")
     sql_ham = f"""
-        SELECT {body} AS content
+        SELECT a.id, av.title, {body} AS content
         FROM article a
         JOIN article_version_newest av ON av.article_id = a.id
         JOIN article_content ac        ON ac.id = av.content_id
+        JOIN "user" u                  ON u.id = a.author_id
         WHERE a.id > %(cutoff)s AND a.state = 'active'
+          AND u.created_at < %(established)s
           AND NOT EXISTS (SELECT 1 FROM user_restriction ur WHERE ur.user_id = a.author_id)
           AND length({body}) >= %(minlen)s
         ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
     sql_spam = f"""
-        SELECT {body} AS content
+        SELECT a.id, av.title, {body} AS content
         FROM article a
         JOIN article_version_newest av ON av.article_id = a.id
         JOIN article_content ac        ON ac.id = av.content_id
         JOIN user_restriction ur       ON ur.user_id = a.author_id
         WHERE a.id > %(cutoff)s
         ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
+
+    def run(cur, sql, params):
+        # replica recovery conflict（SerializationFailure）會偶發取消查詢 → 重試
+        for attempt in range(4):
+            try:
+                cur.execute(sql, params); return cur.fetchall()
+            except psycopg.errors.SerializationFailure:
+                cur.connection.rollback(); _t.sleep(3 * (attempt + 1))
+        raise RuntimeError("replica 查詢連續被 recovery 取消")
+
     out = []
     with psycopg.connect(dsn, connect_timeout=20) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql_ham, {"cutoff": cutoff_id, "minlen": min_text_len,
-                                  "seed": str(seed), "n": n_ham})
-            out += [(r[0], 0) for r in cur.fetchall()]
-            cur.execute(sql_spam, {"cutoff": cutoff_id, "seed": str(seed), "n": n_spam})
-            out += [(r[0], 1) for r in cur.fetchall()]
-    n0 = sum(1 for _, l in out if l == 0)
-    print(f"replica held-out: ham={n0} spam={len(out) - n0} (id>{cutoff_id}, text≥{min_text_len})")
+            for r in run(cur, sql_ham, {"cutoff": cutoff_id, "minlen": min_text_len,
+                                        "established": established_before,
+                                        "seed": str(seed), "n": n_ham}):
+                out.append((r[2], 0, r[0], r[1]))   # (content, label, id, title)
+            for r in run(cur, sql_spam, {"cutoff": cutoff_id, "seed": str(seed), "n": n_spam}):
+                out.append((r[2], 1, r[0], r[1]))
+    n0 = sum(1 for x in out if x[1] == 0)
+    print(f"replica held-out: ham={n0}（老帳號<{established_before}）"
+          f" spam={len(out) - n0} (id>{cutoff_id}, text≥{min_text_len})")
     return out
 
 
 def score(endpoint: str, text: str):
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps({"text": text}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
+    # 文章 endpoint 吃 RAW body（app.py 對 body 直接 _split_group_lines）。
+    # ⚠️ 勿送 JSON {"text":...}——實測那會讓它把 JSON 字串當文章評分→恆回 score≈1.0→全部 block
+    #    （2026-06-15 假象「100% 誤殺」的根因）。
+    req = urllib.request.Request(endpoint, data=text.encode("utf-8"), method="POST")
     r = json.load(urllib.request.urlopen(req, timeout=120))
     return r.get("score"), r.get("decision")
 
@@ -115,6 +134,10 @@ def main() -> int:
     ap.add_argument("--dsn-env", default="PG_DSN", help="--source replica 時，存 DSN 的環境變數名")
     ap.add_argument("--cutoff-id", type=int, default=1104414, help="訓練截點 article.id（v20251229）")
     ap.add_argument("--min-text-len", type=int, default=200, help="ham 最少文字長度，濾純圖/低文字")
+    ap.add_argument("--established-before", default="2025-06-01",
+                    help="clean ham 作者帳號須早於此日（老帳號≈合法；spam 全是新帳號）")
+    ap.add_argument("--min-articles", type=int, default=10,
+                    help="clean ham 作者須已發 ≥N 篇 active 文章（多產作者≈真實創作者）")
     ap.add_argument("--endpoint", required=True)
     ap.add_argument("--ham", type=int, default=150)
     ap.add_argument("--spam", type=int, default=150)
@@ -129,7 +152,8 @@ def main() -> int:
         if not dsn:
             print(f"missing DSN env {args.dsn_env}"); return 2
         samples = load_sample_replica(dsn, args.ham, args.spam,
-                                      args.cutoff_id, args.min_text_len, args.seed)
+                                      args.cutoff_id, args.min_text_len, args.seed,
+                                      args.established_before, args.min_articles)
     else:
         if not args.parquet:
             print("--source parquet requires --parquet"); return 2
@@ -137,18 +161,23 @@ def main() -> int:
 
     by_label = {0: Counter(), 1: Counter()}
     errors = 0
+    misfires = []   # 真 ham 卻被 block(誤殺) / review(送人工) 的個案，給人工檢視
 
     def work(item):
-        text, label = item
-        _, decision = score(args.endpoint, text)
-        return label, decision
+        text, label, aid, title = item
+        sc, decision = score(args.endpoint, text)
+        return label, decision, sc, aid, title, text
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futs = [ex.submit(work, s) for s in samples]
         for f in as_completed(futs):
             try:
-                label, decision = f.result()
+                label, decision, sc, aid, title, text = f.result()
                 by_label[label][decision or "error"] += 1
+                if label == 0 and decision in ("block", "review"):
+                    misfires.append({"decision": decision, "score": sc,
+                                     "article_id": aid, "title": (title or "")[:80],
+                                     "snippet": " ".join((text or "").split())[:200]})
             except Exception as e:  # noqa: BLE001
                 errors += 1
                 print(f"  err: {str(e)[:120]}")
@@ -166,6 +195,15 @@ def main() -> int:
                                     "review": review, "allow": allow, "raw": dict(c)}
     print(f"errors={errors}")
     print("note: ham block% = 誤殺；spam block% = recall；review% = 進人工佇列")
+
+    # 誤殺(block)個案優先、其次 review；附 id/標題/分數/片段供人工判斷是真誤殺還是標錯的 spam
+    misfires.sort(key=lambda m: (m["decision"] != "block", -(m["score"] or 0)))
+    result["misfires"] = misfires
+    blocked = [m for m in misfires if m["decision"] == "block"]
+    print(f"\n=== 真 ham 被誤判個案：block(誤殺)={len(blocked)} review={len(misfires) - len(blocked)} ===")
+    for m in misfires[:25]:
+        print(f"[{m['decision']:>6}] score={m['score']} id={m['article_id']} «{m['title']}»")
+        print(f"         {m['snippet']}")
     if args.out:
         with open(args.out, "w") as fh:
             json.dump(result, fh, ensure_ascii=False, indent=2)

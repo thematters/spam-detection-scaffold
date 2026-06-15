@@ -11,7 +11,7 @@ env:
     STAGING_ENDPOINT: "https://fjrmugbg5j.execute-api.ap-southeast-1.amazonaws.com/Prod/spam/infer/"
   parameter-store:
     PG_DSN: "/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING"
-    HASH_SALT: "/prod/matters-server/MATTERS_AWS_SPAM_SAMPLE_HASH_SALT"
+    HASH_SALT: "/prod/matters-server/MATTERS_SPAM_SAMPLE_HASH_SALT"
 
 phases:
   install:
