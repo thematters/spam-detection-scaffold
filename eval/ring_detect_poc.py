@@ -17,7 +17,9 @@
   披着律师外衣的搅局者  exact 2 → 近似 29 帳號 / 33%
   海外中国人权律师联盟  exact 3 → 近似 26 帳號 / 10%（內容模型也 block 0.996）
   高雄翻译社          exact 10 → 近似 14 帳號 / 100% 亂碼（內容模型漏：allow 0.091）
-  live173影音live秀   exact 24 → 近似仍只 4（文字變化太大）/ 30% → 需「廣告同一實體」訊號（共用網域/聯絡/品牌詞）
+  live173影音live秀   exact 24 → 近似仍只 4（文字變化太大）→ 實體 ring 10（共用網域/聯絡，文字打不開時的解方）/ 30% 亂碼
+三訊號互補：文字型群集吃近似 ring（老灯26/披着29/海外26/高雄14），廣告型吃實體 ring（live173: 4→10），
+帳號名亂碼當共同補充（高雄 100%）。正式版任一訊號達門檻即列候選，再走分級處置（見 SPAM_ROADMAP 軸一 D）。
 
 用法：python ring_detect_poc.py "<關鍵字1>" "<關鍵字2>" ...
 （需 cloudscraper + opencc-python-reimplemented；production search 在 Cloudflare 後）
@@ -53,6 +55,29 @@ def _norm(text: str) -> str:
 def template_family(text: str) -> str:
     """exact 模板指紋（與 prepare_article_families.py 同口徑）：遮 url/handle/數字後取前綴雜湊。"""
     return hashlib.md5(_norm(text)[:200].encode()).hexdigest()[:8]
+
+
+_domain = re.compile(r"\b([a-z0-9-]+\.(?:com|net|cc|tv|xyz|top|vip|me|io|app|live|info))\b", re.I)
+_contact = re.compile(
+    r"(?:line|telegram|tg|whatsapp|wechat|微信|賴|skype)[\s:：@]*([a-z0-9_\-\.]{3,})", re.I)
+
+
+def advertised_entities(text: str) -> set:
+    """抽『廣告的同一實體』：外部網域 + 聯絡 id（line/telegram/wechat…）。
+    對 live173 這種『同服務、文案每篇都變』的廣告，實體是不變量——文字近似打不開時用這個。"""
+    t = _plain(text).lower()
+    ents = {m.group(1).lower() for m in _domain.finditer(t)}
+    ents |= {"contact:" + m.group(1).lower() for m in _contact.finditer(t)}
+    return ents
+
+
+def entity_top_ring(items: list) -> int:
+    """共用任一廣告實體的最大跨帳號數（items: [{'content','author'}]）。"""
+    ent_authors = collections.defaultdict(set)
+    for a in items:
+        for e in advertised_entities(a["content"]):
+            ent_authors[e].add(a["author"])
+    return max((len(v) for v in ent_authors.values()), default=0)
 
 
 def _shingles(text: str, k: int = 4) -> set:
@@ -153,19 +178,20 @@ def analyze(keyword: str, arts: dict) -> dict:
     bot_ratio = sum(1 for b in bot if b >= 0.4) / len(bot) if bot else 0.0
     return {"keyword": keyword, "articles": len(items), "authors": len(authors),
             "exact_families": len(exact_fams),
-            "top_ring_accounts": top_ring, "bot_username_ratio": bot_ratio}
+            "top_ring_accounts": top_ring, "bot_username_ratio": bot_ratio,
+            "entity_top_ring": entity_top_ring(items)}
 
 
 def main(argv):
     keywords = argv[1:] or ["老灯闲聊", "披着律师外衣的搅局者", "海外中国人权律师联盟",
                             "高雄翻译社", "live173影音live秀"]
     s = _client()
-    print(f"{'群集':<22}{'篇':>4}{'作者':>5}{'exact模板':>9}{'最大近似ring':>13}{'亂碼帳號比':>10}")
-    print("-" * 70)
+    print(f"{'群集':<22}{'篇':>4}{'作者':>5}{'exact模板':>9}{'近似ring':>9}{'實體ring':>9}{'亂碼帳號比':>10}")
+    print("-" * 78)
     for kw in keywords:
         r = analyze(kw, fetch_cluster(s, kw))
         print(f"{kw:<22}{r['articles']:>4}{r['authors']:>5}{r['exact_families']:>9}"
-              f"{r['top_ring_accounts']:>13}{r['bot_username_ratio']*100:>9.0f}%")
+              f"{r['top_ring_accounts']:>9}{r['entity_top_ring']:>9}{r['bot_username_ratio']*100:>9.0f}%")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,46 @@ def load_sample(parquet: str, n_ham: int, n_spam: int, seed: int):
     return [(t, 0) for t in ham.content] + [(t, 1) for t in spam.content]
 
 
+def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
+                        min_text_len: int, seed: int):
+    """正式驗收用：從 read-replica 撈訓練截點（id>cutoff）之後的乾淨 held-out。
+      ham  = 截點後、active、作者未受限、文字長度達標（濾掉純圖/低文字）= 真正合法樣本。
+      spam = 截點後、作者受限（小黑屋）的文章 = spam 代理正樣本。
+    全程唯讀 SELECT。需 psycopg(v3)。"""
+    import psycopg
+
+    body = ("regexp_replace(coalesce(av.title,'') || ' ' || coalesce(ac.content,''), "
+            "'<[^>]+>', ' ', 'g')")
+    sql_ham = f"""
+        SELECT {body} AS content
+        FROM article a
+        JOIN article_version_newest av ON av.article_id = a.id
+        JOIN article_content ac        ON ac.id = av.content_id
+        WHERE a.id > %(cutoff)s AND a.state = 'active'
+          AND NOT EXISTS (SELECT 1 FROM user_restriction ur WHERE ur.user_id = a.author_id)
+          AND length({body}) >= %(minlen)s
+        ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
+    sql_spam = f"""
+        SELECT {body} AS content
+        FROM article a
+        JOIN article_version_newest av ON av.article_id = a.id
+        JOIN article_content ac        ON ac.id = av.content_id
+        JOIN user_restriction ur       ON ur.user_id = a.author_id
+        WHERE a.id > %(cutoff)s
+        ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
+    out = []
+    with psycopg.connect(dsn, connect_timeout=20) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql_ham, {"cutoff": cutoff_id, "minlen": min_text_len,
+                                  "seed": str(seed), "n": n_ham})
+            out += [(r[0], 0) for r in cur.fetchall()]
+            cur.execute(sql_spam, {"cutoff": cutoff_id, "seed": str(seed), "n": n_spam})
+            out += [(r[0], 1) for r in cur.fetchall()]
+    n0 = sum(1 for _, l in out if l == 0)
+    print(f"replica held-out: ham={n0} spam={len(out) - n0} (id>{cutoff_id}, text≥{min_text_len})")
+    return out
+
+
 def score(endpoint: str, text: str):
     req = urllib.request.Request(
         endpoint,
@@ -69,15 +109,32 @@ def score(endpoint: str, text: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--parquet", required=True)
+    ap.add_argument("--source", choices=["parquet", "replica"], default="parquet",
+                    help="parquet=in-sample 偏樂觀；replica=正式驗收（截點後乾淨 held-out）")
+    ap.add_argument("--parquet", help="--source parquet 時必填（本地或 s3://）")
+    ap.add_argument("--dsn-env", default="PG_DSN", help="--source replica 時，存 DSN 的環境變數名")
+    ap.add_argument("--cutoff-id", type=int, default=1104414, help="訓練截點 article.id（v20251229）")
+    ap.add_argument("--min-text-len", type=int, default=200, help="ham 最少文字長度，濾純圖/低文字")
     ap.add_argument("--endpoint", required=True)
     ap.add_argument("--ham", type=int, default=150)
     ap.add_argument("--spam", type=int, default=150)
-    ap.add_argument("--concurrency", type=int, default=8)
+    ap.add_argument("--concurrency", type=int, default=3,
+                    help="預設低並發避免 endpoint 504 冷啟動污染")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--out", help="把結果 JSON 寫到此路徑（CodeBuild 上傳 S3 用）")
     args = ap.parse_args()
 
-    samples = load_sample(args.parquet, args.ham, args.spam, args.seed)
+    if args.source == "replica":
+        dsn = os.environ.get(args.dsn_env)
+        if not dsn:
+            print(f"missing DSN env {args.dsn_env}"); return 2
+        samples = load_sample_replica(dsn, args.ham, args.spam,
+                                      args.cutoff_id, args.min_text_len, args.seed)
+    else:
+        if not args.parquet:
+            print("--source parquet requires --parquet"); return 2
+        samples = load_sample(args.parquet, args.ham, args.spam, args.seed)
+
     by_label = {0: Counter(), 1: Counter()}
     errors = 0
 
@@ -96,17 +153,23 @@ def main() -> int:
                 errors += 1
                 print(f"  err: {str(e)[:120]}")
 
-    print("\n=== staging conformal acceptance (IN-SAMPLE, optimistic) ===")
+    tag = "REPLICA held-out（正式驗收）" if args.source == "replica" else "IN-SAMPLE, optimistic"
+    print(f"\n=== staging conformal acceptance ({tag}) ===")
+    result = {"source": args.source, "endpoint": args.endpoint, "errors": errors, "by_label": {}}
     for label, name in [(0, "ham"), (1, "spam")]:
         c = by_label[label]
         tot = sum(c.values()) or 1
-        block = c.get("block", 0) / tot
-        review = c.get("review", 0) / tot
-        allow = c.get("allow", 0) / tot
+        block, review, allow = (c.get(k, 0) / tot for k in ("block", "review", "allow"))
         print(f"{name:>4}: n={sum(c.values())} block={block:.1%} review={review:.1%} "
               f"allow={allow:.1%}  raw={dict(c)}")
+        result["by_label"][name] = {"n": sum(c.values()), "block": block,
+                                    "review": review, "allow": allow, "raw": dict(c)}
     print(f"errors={errors}")
     print("note: ham block% = 誤殺；spam block% = recall；review% = 進人工佇列")
+    if args.out:
+        with open(args.out, "w") as fh:
+            json.dump(result, fh, ensure_ascii=False, indent=2)
+        print(f"wrote {args.out}")
     return 0
 
 
