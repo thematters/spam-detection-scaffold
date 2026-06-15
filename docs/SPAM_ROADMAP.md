@@ -41,6 +41,36 @@
   `restoreCommunityWatchComment`）。`review` 帶可直接落成一筆 `reviewState='pending'` 的待裁決項。
 - 依賴：endpoint 先回傳 `decision`（軸一 A/B 完成後）。
 
+### D — 帳號層 ring 凍結（「開新帳號→貼重複文本」這類，內容打分擋不住）
+**動機（2026-06-15 實證）**：純內容打分對這類濫用無能為力。對 5 個已知群集實測（`eval/ring_detect_poc.py`）：
+
+| 群集 | 篇/作者/模板族 | 最大 ring | 內容模型 |
+| --- | --- | --- | --- |
+| 老灯闲聊 | 30 / 30 / 3 | 1 模板跨 **18** 帳號 | 部分純圖看不到 |
+| 披着律师外衣的搅局者 | 30 / 29 / 2 | 1 模板跨 **28** 帳號 | 詐騙長文可 block |
+| 海外中国人权律师联盟 | 30 / 27 / 3 | 1 模板跨 **25** 帳號 | ✅ block 0.996 |
+| 高雄翻译社 | 30 / 21 / 10 | 1 模板跨 **11** 帳號 | ❌ allow 0.091（漏） |
+| live173影音live秀 | 30 / 28 / 24 | 1 模板跨 4 帳號 | ❌ allow 0.117（漏） |
+
+定義訊號不是文章語意，是**行為模式**：同一 `template_family` 被大量 throwaway 新帳號重複貼。ring 訊號抓得到內容模型漏掉的群集。
+
+**三層設計（沿用 conformal「不確定就送人工」，升到帳號層）**：
+1. **行為偵測（缺的那塊，材料現成）**：複用 `prepare_article_families.py` 的 `template_family` 指紋；
+   group by family、count distinct author、過濾帳號新/低 karma → 跨帳號重複 ring。原型 `eval/ring_detect_poc.py`
+   已用公開搜尋（唯讀、不碰 DB）證明可行；正式版改吃 read-replica / L1 匯出的近期文章。
+2. **證據合流（內容模型當輔助不當唯一）**：ring 訊號 + 文章 conformal decision + 純圖旗標 三者合流。
+3. **分級處置**：高信度 ring（帳號新 **且** 跨帳號重複 ≥M 篇 **且**（內容 block 或純圖重複））→ 凍結；
+   其餘 → 人工佇列（重用軸一 C 的 Community Watch review，擴成可對帳號動作）。動作原語 = `user_restriction`/`archiveUser`。
+
+**安全護欄（凍結高風險，硬性）**：① 雙鑰——≥2 獨立訊號才自動凍結，單訊號→人工；② 可逆+可申訴（限制非刪除、通知本人，DSA Art.17 一致）；
+③ 老帳號（年齡/karma 過門檻）豁免自動凍結；④ 影子先行——上線前「只記錄不動作」跑一週看誤傷再開真實處置。
+
+**閉環**：凍結即 `user_restriction`，而 L1 SQL 已把該訊號當正樣本 → 越凍越準。
+
+**弱點/待解**：live173 模板變化多（24 族），純指紋 ring 偏弱 → 需近似比對（shingling/minhash）或補「帳號名亂碼」訊號；繁簡字要正規化（實測「披著…」繁體零結果、簡體「披着…」28 帳號）。
+
+**依賴鏈**：軸一 B 驗收 → C（佇列接帳號動作）→ **D（ring 偵測 + 分級凍結）**。
+
 ---
 
 ## 軸二：註銷/處置資料留存訓練（三層全做，L1→L3）
@@ -124,4 +154,6 @@
 - [ ] L1：增量匯出 job（GH Action cron + read-replica secret + S3）
 - [ ] L2：matters-server 快照事件 + SQS→Lambda→S3
 - [ ] 軸一 A / C：留言 endpoint conformal + server 讀 decision
+- [x] 軸一 D 原型：ring 偵測 POC（`eval/ring_detect_poc.py`，5 群集實證）
+- [ ] 軸一 D：正式 ring 偵測（read-replica/L1 資料）+ 分級凍結 + 影子先行
 - [ ] L3：標籤品質規則 + 隱私政策數值
