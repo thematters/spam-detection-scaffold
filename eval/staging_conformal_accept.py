@@ -62,11 +62,13 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
                         min_text_len: int, seed: int, established_before: str,
                         min_articles: int):
     """正式驗收用：從 read-replica 撈訓練截點（id>cutoff）之後的 held-out。
-      ham  = 截點後 active、作者未受限、**老帳號（created_at < established_before）**、
-             **作者已發 ≥min_articles 篇 active 文章**、文字達標。整個 spam 模式是「新帳號→貼文」，
-             故老帳號+多產作者≈真正合法 → 才量得出真實誤殺率（v1「active+未受限」被未處置 spam 污染）。
+      ham  = 截點後 active、作者未受限、**老帳號（created_at < established_before）**、文字達標。
+             整個 spam 模式是「新帳號→貼文」，故老帳號≈真正合法 → 才量得出真實誤殺率
+             （v1「active+未受限」被未處置 spam 污染）。
       spam = 截點後、作者受限（小黑屋）的文章 = spam 代理正樣本。
-    全程唯讀 SELECT。需 psycopg(v3)。"""
+    全程唯讀 SELECT。需 psycopg(v3)。⚠️ replica 上避免昂貴查詢（會被 WAL replay 以
+    SerializationFailure 取消）——故不用每列子查詢（如作者文章數），只靠帳號年齡這個快又乾淨的訊號。"""
+    import time as _t
     import psycopg
 
     body = ("regexp_replace(coalesce(av.title,'') || ' ' || coalesce(ac.content,''), "
@@ -81,8 +83,6 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
           AND u.created_at < %(established)s
           AND NOT EXISTS (SELECT 1 FROM user_restriction ur WHERE ur.user_id = a.author_id)
           AND length({body}) >= %(minlen)s
-          AND (SELECT count(*) FROM article a2
-               WHERE a2.author_id = a.author_id AND a2.state = 'active') >= %(minart)s
         ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
     sql_spam = f"""
         SELECT a.id, av.title, {body} AS content
@@ -92,17 +92,27 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
         JOIN user_restriction ur       ON ur.user_id = a.author_id
         WHERE a.id > %(cutoff)s
         ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
+
+    def run(cur, sql, params):
+        # replica recovery conflict（SerializationFailure）會偶發取消查詢 → 重試
+        for attempt in range(4):
+            try:
+                cur.execute(sql, params); return cur.fetchall()
+            except psycopg.errors.SerializationFailure:
+                cur.connection.rollback(); _t.sleep(3 * (attempt + 1))
+        raise RuntimeError("replica 查詢連續被 recovery 取消")
+
     out = []
     with psycopg.connect(dsn, connect_timeout=20) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql_ham, {"cutoff": cutoff_id, "minlen": min_text_len,
-                                  "established": established_before, "minart": min_articles,
-                                  "seed": str(seed), "n": n_ham})
-            out += [(r[2], 0, r[0], r[1]) for r in cur.fetchall()]   # (content, label, id, title)
-            cur.execute(sql_spam, {"cutoff": cutoff_id, "seed": str(seed), "n": n_spam})
-            out += [(r[2], 1, r[0], r[1]) for r in cur.fetchall()]
+            for r in run(cur, sql_ham, {"cutoff": cutoff_id, "minlen": min_text_len,
+                                        "established": established_before,
+                                        "seed": str(seed), "n": n_ham}):
+                out.append((r[2], 0, r[0], r[1]))   # (content, label, id, title)
+            for r in run(cur, sql_spam, {"cutoff": cutoff_id, "seed": str(seed), "n": n_spam}):
+                out.append((r[2], 1, r[0], r[1]))
     n0 = sum(1 for x in out if x[1] == 0)
-    print(f"replica held-out: ham={n0}（老帳號<{established_before}、≥{min_articles}篇）"
+    print(f"replica held-out: ham={n0}（老帳號<{established_before}）"
           f" spam={len(out) - n0} (id>{cutoff_id}, text≥{min_text_len})")
     return out
 
