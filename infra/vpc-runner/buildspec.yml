@@ -1,0 +1,53 @@
+# CodeBuild buildspec — VPC 內執行入口，跑「需要連 read-replica」的批次工作。
+# 用環境變數 JOB 選工作：ring | acceptance | l1
+# 觸發：aws codebuild start-build --project-name spam-vpc-runner \
+#         --environment-variables-override name=JOB,value=ring
+version: 0.2
+
+env:
+  variables:
+    JOB: "ring"          # ring | acceptance | l1
+    PG_SSM: "/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING"
+  parameter-store:
+    PG_DSN: "/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install -q psycopg2-binary requests cloudscraper opencc-python-reimplemented
+  build:
+    commands:
+      - echo "JOB=$JOB  (連線走 in-VPC replica，DSN 來自 SSM，不落地不印出)"
+      - |
+        case "$JOB" in
+          ring)
+            # 軸一 D：文章層 ring 偵測（DB 端粗篩；候選寫 S3，不做任何處置）
+            # app 層近似精修沿用 eval/ring_detect_poc.py 的 neardup/username 邏輯（後續工項）。
+            psql "$PG_DSN" -v days="${DAYS:-30}" -v min_authors="${MIN_AUTHORS:-3}" \
+                 -v new_account_days="${NEW_ACCOUNT_DAYS:-30}" \
+                 -f sql/detect_spam_rings.sql --csv -o /tmp/ring_candidates.csv
+            aws s3 cp /tmp/ring_candidates.csv "s3://matters-spam-training-samples/ring-candidates/$(date +%Y-%m-%d)/candidates.csv"
+            ;;
+          acceptance)
+            # 軸一 B：conformal 定論驗收，抽乾淨 held-out ham 打 staging endpoint
+            python eval/staging_conformal_accept.py --source replica --dsn-env PG_DSN \
+                   --out /tmp/acceptance.json
+            aws s3 cp /tmp/acceptance.json "s3://matters-spam-training-samples/conformal-acceptance/$(date +%Y-%m-%d)/result.json"
+            ;;
+          l1)
+            # 軸二 L1：被動增量抽取訓練樣本
+            python scripts/export_training_samples.py --dsn-env PG_DSN \
+                   --bucket matters-spam-training-samples
+            ;;
+          *) echo "unknown JOB=$JOB" && exit 1 ;;
+        esac
+  post_build:
+    commands:
+      - echo "done JOB=$JOB"
+
+artifacts:
+  files:
+    - /tmp/acceptance.json
+  discard-paths: yes
