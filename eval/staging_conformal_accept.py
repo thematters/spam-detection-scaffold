@@ -99,11 +99,10 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
 
 
 def score(endpoint: str, text: str):
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps({"text": text}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
+    # 文章 endpoint 吃 RAW body（app.py 對 body 直接 _split_group_lines）。
+    # ⚠️ 勿送 JSON {"text":...}——實測那會讓它把 JSON 字串當文章評分→恆回 score≈1.0→全部 block
+    #    （2026-06-15 假象「100% 誤殺」的根因）。
+    req = urllib.request.Request(endpoint, data=text.encode("utf-8"), method="POST")
     r = json.load(urllib.request.urlopen(req, timeout=120))
     return r.get("score"), r.get("decision")
 
