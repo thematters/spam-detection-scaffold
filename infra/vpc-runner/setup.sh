@@ -19,7 +19,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PROJECT=spam-vpc-runner
 ROLE_NAME=spam-vpc-runner
 VPC_ID=vpc-02362a4fe3806ffac
-SUBNETS_JSON='["subnet-0b011dd1ca64fa0a1","subnet-08074bc162cd5a4a3","subnet-0415147ddf68a48f2"]'
+# 只用「有 NAT 對外路由」的私有子網（CodeBuild ENI 無 public IP，IGW 公有子網會無法對外
+# → clone/pip/endpoint timeout）。subnet-08074...是 IGW 公有子網，已排除。兩者皆能連 replica（DB SG 按 SG 放行）。
+SUBNETS_JSON='["subnet-0b011dd1ca64fa0a1","subnet-0415147ddf68a48f2"]'
 DB_SG=sg-0aff7c791291d103d         # replica 的 DB security group（5432）
 SOURCE_REPO="https://github.com/thematters/spam-detection-scaffold.git"
 
