@@ -54,7 +54,8 @@ def load_sample(parquet: str, n_ham: int, n_spam: int, seed: int):
     ham = df[df.is_spam == 0].sample(min(n_ham, (df.is_spam == 0).sum()), random_state=seed)
     spam = df[df.is_spam == 1].sample(min(n_spam, (df.is_spam == 1).sum()), random_state=seed)
     print(f"sampled ham={len(ham)} spam={len(spam)}")
-    return [(t, 0) for t in ham.content] + [(t, 1) for t in spam.content]
+    return ([(t, 0, None, "") for t in ham.content]
+            + [(t, 1, None, "") for t in spam.content])
 
 
 def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
@@ -68,7 +69,7 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
     body = ("regexp_replace(coalesce(av.title,'') || ' ' || coalesce(ac.content,''), "
             "'<[^>]+>', ' ', 'g')")
     sql_ham = f"""
-        SELECT {body} AS content
+        SELECT a.id, av.title, {body} AS content
         FROM article a
         JOIN article_version_newest av ON av.article_id = a.id
         JOIN article_content ac        ON ac.id = av.content_id
@@ -77,7 +78,7 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
           AND length({body}) >= %(minlen)s
         ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
     sql_spam = f"""
-        SELECT {body} AS content
+        SELECT a.id, av.title, {body} AS content
         FROM article a
         JOIN article_version_newest av ON av.article_id = a.id
         JOIN article_content ac        ON ac.id = av.content_id
@@ -89,10 +90,10 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
         with conn.cursor() as cur:
             cur.execute(sql_ham, {"cutoff": cutoff_id, "minlen": min_text_len,
                                   "seed": str(seed), "n": n_ham})
-            out += [(r[0], 0) for r in cur.fetchall()]
+            out += [(r[2], 0, r[0], r[1]) for r in cur.fetchall()]   # (content, label, id, title)
             cur.execute(sql_spam, {"cutoff": cutoff_id, "seed": str(seed), "n": n_spam})
-            out += [(r[0], 1) for r in cur.fetchall()]
-    n0 = sum(1 for _, l in out if l == 0)
+            out += [(r[2], 1, r[0], r[1]) for r in cur.fetchall()]
+    n0 = sum(1 for x in out if x[1] == 0)
     print(f"replica held-out: ham={n0} spam={len(out) - n0} (id>{cutoff_id}, text≥{min_text_len})")
     return out
 
@@ -137,18 +138,23 @@ def main() -> int:
 
     by_label = {0: Counter(), 1: Counter()}
     errors = 0
+    misfires = []   # 真 ham 卻被 block(誤殺) / review(送人工) 的個案，給人工檢視
 
     def work(item):
-        text, label = item
-        _, decision = score(args.endpoint, text)
-        return label, decision
+        text, label, aid, title = item
+        sc, decision = score(args.endpoint, text)
+        return label, decision, sc, aid, title, text
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futs = [ex.submit(work, s) for s in samples]
         for f in as_completed(futs):
             try:
-                label, decision = f.result()
+                label, decision, sc, aid, title, text = f.result()
                 by_label[label][decision or "error"] += 1
+                if label == 0 and decision in ("block", "review"):
+                    misfires.append({"decision": decision, "score": sc,
+                                     "article_id": aid, "title": (title or "")[:80],
+                                     "snippet": " ".join((text or "").split())[:200]})
             except Exception as e:  # noqa: BLE001
                 errors += 1
                 print(f"  err: {str(e)[:120]}")
@@ -166,6 +172,15 @@ def main() -> int:
                                     "review": review, "allow": allow, "raw": dict(c)}
     print(f"errors={errors}")
     print("note: ham block% = 誤殺；spam block% = recall；review% = 進人工佇列")
+
+    # 誤殺(block)個案優先、其次 review；附 id/標題/分數/片段供人工判斷是真誤殺還是標錯的 spam
+    misfires.sort(key=lambda m: (m["decision"] != "block", -(m["score"] or 0)))
+    result["misfires"] = misfires
+    blocked = [m for m in misfires if m["decision"] == "block"]
+    print(f"\n=== 真 ham 被誤判個案：block(誤殺)={len(blocked)} review={len(misfires) - len(blocked)} ===")
+    for m in misfires[:25]:
+        print(f"[{m['decision']:>6}] score={m['score']} id={m['article_id']} «{m['title']}»")
+        print(f"         {m['snippet']}")
     if args.out:
         with open(args.out, "w") as fh:
             json.dump(result, fh, ensure_ascii=False, indent=2)
