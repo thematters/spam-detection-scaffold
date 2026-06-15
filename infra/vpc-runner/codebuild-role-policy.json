@@ -1,0 +1,62 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:ap-southeast-1:903380195283:log-group:/aws/codebuild/spam-vpc-runner*"
+    },
+    {
+      "Sid": "VpcNetworkInterfaces",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateNetworkInterface",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeDhcpOptions",
+        "ec2:DescribeVpcs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "VpcCreateEniPermission",
+      "Effect": "Allow",
+      "Action": "ec2:CreateNetworkInterfacePermission",
+      "Resource": "arn:aws:ec2:ap-southeast-1:903380195283:network-interface/*",
+      "Condition": {
+        "StringEquals": {"ec2:AuthorizedService": "codebuild.amazonaws.com"}
+      }
+    },
+    {
+      "Sid": "ReadReplicaDsnFromSsm",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": "arn:aws:ssm:ap-southeast-1:903380195283:parameter/prod/matters-server/MATTERS_PG_READONLY_CONNECTION_STRING"
+    },
+    {
+      "Sid": "DecryptSecureString",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {"kms:ViaService": "ssm.ap-southeast-1.amazonaws.com"}
+      }
+    },
+    {
+      "Sid": "WriteTrainingAndResultsBucket",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::matters-spam-training-samples",
+        "arn:aws:s3:::matters-spam-training-samples/*"
+      ]
+    }
+  ]
+}
