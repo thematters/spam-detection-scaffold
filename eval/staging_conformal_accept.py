@@ -145,6 +145,7 @@ def main() -> int:
                     help="預設低並發避免 endpoint 504 冷啟動污染")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", help="把結果 JSON 寫到此路徑（CodeBuild 上傳 S3 用）")
+    ap.add_argument("--dump", help="只撈 held-out 寫 jsonl(id,label,title,content) 不評分；給本地用新模型評分驗收")
     args = ap.parse_args()
 
     if args.source == "replica":
@@ -158,6 +159,14 @@ def main() -> int:
         if not args.parquet:
             print("--source parquet requires --parquet"); return 2
         samples = load_sample(args.parquet, args.ham, args.spam, args.seed)
+
+    if args.dump:
+        with open(args.dump, "w") as fh:
+            for content, label, aid, title in samples:
+                fh.write(json.dumps({"id": aid, "label": label, "title": title,
+                                     "content": content}, ensure_ascii=False) + "\n")
+        print(f"dumped {len(samples)} held-out → {args.dump}（不評分）")
+        return 0
 
     by_label = {0: Counter(), 1: Counter()}
     errors = 0
