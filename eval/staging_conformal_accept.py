@@ -60,38 +60,59 @@ def load_sample(parquet: str, n_ham: int, n_spam: int, seed: int):
 
 def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
                         min_text_len: int, seed: int, established_before: str,
-                        min_articles: int):
-    """正式驗收用：從 read-replica 撈訓練截點（id>cutoff）之後的 held-out。
-      ham  = 截點後 active、作者未受限、**老帳號（created_at < established_before）**、文字達標。
+                        min_articles: int, content_type: str = "article"):
+    """正式驗收用：從 read-replica 撈乾淨 held-out。
+      ham  = active、作者未受限、**老帳號（created_at < established_before）**、文字達標。
              整個 spam 模式是「新帳號→貼文」，故老帳號≈真正合法 → 才量得出真實誤殺率
-             （v1「active+未受限」被未處置 spam 污染）。
-      spam = 截點後、作者受限（小黑屋）的文章 = spam 代理正樣本。
+             （「active+未受限」會被未處置 spam 污染）。
+      spam = 作者受限（小黑屋）的內容 = spam 代理正樣本。
+    content_type:
+      article = article→article_version_newest→article_content，並以 id>cutoff 取訓練截點後 held-out。
+      moment  = moment.content 單一短內容欄位；無 article id 截點（短內容模型訓練集未知），純靠帳號年齡分層。
     全程唯讀 SELECT。需 psycopg(v3)。⚠️ replica 上避免昂貴查詢（會被 WAL replay 以
-    SerializationFailure 取消）——故不用每列子查詢（如作者文章數），只靠帳號年齡這個快又乾淨的訊號。"""
+    SerializationFailure 取消）——故不用每列子查詢，只靠帳號年齡這個快又乾淨的訊號。"""
     import time as _t
     import psycopg
 
-    body = ("regexp_replace(coalesce(av.title,'') || ' ' || coalesce(ac.content,''), "
-            "'<[^>]+>', ' ', 'g')")
-    sql_ham = f"""
-        SELECT a.id, av.title, {body} AS content
-        FROM article a
-        JOIN article_version_newest av ON av.article_id = a.id
-        JOIN article_content ac        ON ac.id = av.content_id
-        JOIN "user" u                  ON u.id = a.author_id
-        WHERE a.id > %(cutoff)s AND a.state = 'active'
-          AND u.created_at < %(established)s
-          AND NOT EXISTS (SELECT 1 FROM user_restriction ur WHERE ur.user_id = a.author_id)
-          AND length({body}) >= %(minlen)s
-        ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
-    sql_spam = f"""
-        SELECT a.id, av.title, {body} AS content
-        FROM article a
-        JOIN article_version_newest av ON av.article_id = a.id
-        JOIN article_content ac        ON ac.id = av.content_id
-        JOIN user_restriction ur       ON ur.user_id = a.author_id
-        WHERE a.id > %(cutoff)s
-        ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
+    if content_type == "moment":
+        body = "regexp_replace(coalesce(m.content,''), '<[^>]+>', ' ', 'g')"
+        sql_ham = f"""
+            SELECT m.id, '' AS title, {body} AS content
+            FROM moment m
+            JOIN "user" u ON u.id = m.author_id
+            WHERE m.state = 'active'
+              AND u.created_at < %(established)s
+              AND NOT EXISTS (SELECT 1 FROM user_restriction ur WHERE ur.user_id = m.author_id)
+              AND length({body}) >= %(minlen)s
+            ORDER BY md5(m.id::text || %(seed)s) LIMIT %(n)s"""
+        sql_spam = f"""
+            SELECT m.id, '' AS title, {body} AS content
+            FROM moment m
+            JOIN user_restriction ur ON ur.user_id = m.author_id
+            WHERE m.state = 'active'
+            ORDER BY md5(m.id::text || %(seed)s) LIMIT %(n)s"""
+    else:
+        body = ("regexp_replace(coalesce(av.title,'') || ' ' || coalesce(ac.content,''), "
+                "'<[^>]+>', ' ', 'g')")
+        sql_ham = f"""
+            SELECT a.id, av.title, {body} AS content
+            FROM article a
+            JOIN article_version_newest av ON av.article_id = a.id
+            JOIN article_content ac        ON ac.id = av.content_id
+            JOIN "user" u                  ON u.id = a.author_id
+            WHERE a.id > %(cutoff)s AND a.state = 'active'
+              AND u.created_at < %(established)s
+              AND NOT EXISTS (SELECT 1 FROM user_restriction ur WHERE ur.user_id = a.author_id)
+              AND length({body}) >= %(minlen)s
+            ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
+        sql_spam = f"""
+            SELECT a.id, av.title, {body} AS content
+            FROM article a
+            JOIN article_version_newest av ON av.article_id = a.id
+            JOIN article_content ac        ON ac.id = av.content_id
+            JOIN user_restriction ur       ON ur.user_id = a.author_id
+            WHERE a.id > %(cutoff)s
+            ORDER BY md5(a.id::text || %(seed)s) LIMIT %(n)s"""
 
     def run(cur, sql, params):
         # replica recovery conflict（SerializationFailure）會偶發取消查詢 → 重試
@@ -112,8 +133,9 @@ def load_sample_replica(dsn: str, n_ham: int, n_spam: int, cutoff_id: int,
             for r in run(cur, sql_spam, {"cutoff": cutoff_id, "seed": str(seed), "n": n_spam}):
                 out.append((r[2], 1, r[0], r[1]))
     n0 = sum(1 for x in out if x[1] == 0)
-    print(f"replica held-out: ham={n0}（老帳號<{established_before}）"
-          f" spam={len(out) - n0} (id>{cutoff_id}, text≥{min_text_len})")
+    boundary = "全 moment" if content_type == "moment" else f"id>{cutoff_id}"
+    print(f"replica held-out [{content_type}]: ham={n0}（老帳號<{established_before}）"
+          f" spam={len(out) - n0} ({boundary}, text≥{min_text_len})")
     return out
 
 
@@ -130,6 +152,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", choices=["parquet", "replica"], default="parquet",
                     help="parquet=in-sample 偏樂觀；replica=正式驗收（截點後乾淨 held-out）")
+    ap.add_argument("--content-type", choices=["article", "moment"], default="article",
+                    help="replica 來源的內容型別：article（version join + id 截點）或 moment（單一短內容欄位）")
     ap.add_argument("--parquet", help="--source parquet 時必填（本地或 s3://）")
     ap.add_argument("--dsn-env", default="PG_DSN", help="--source replica 時，存 DSN 的環境變數名")
     ap.add_argument("--cutoff-id", type=int, default=1104414, help="訓練截點 article.id（v20251229）")
@@ -154,7 +178,8 @@ def main() -> int:
             print(f"missing DSN env {args.dsn_env}"); return 2
         samples = load_sample_replica(dsn, args.ham, args.spam,
                                       args.cutoff_id, args.min_text_len, args.seed,
-                                      args.established_before, args.min_articles)
+                                      args.established_before, args.min_articles,
+                                      content_type=args.content_type)
     else:
         if not args.parquet:
             print("--source parquet requires --parquet"); return 2
