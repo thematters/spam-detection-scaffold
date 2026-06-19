@@ -72,10 +72,36 @@ phases:
             # 撈動態乾淨 held-out（老帳號 ham + 受限作者 spam）寫 S3，給本地打短內容模型量誤殺/召回。
             # 動態短內容 → min-text-len 預設較低（10）；無 article id 截點，用帳號年齡分層。
             python eval/staging_conformal_accept.py --source replica --dsn-env PG_DSN \
-                   --content-type moment --endpoint x \
+                   --content-type moment --endpoint x --seed "${SEED:-42}" \
                    --min-text-len "${MINLEN:-10}" --ham "${HAM:-500}" --spam "${SPAM:-250}" \
                    --dump /tmp/moment_heldout.jsonl
             aws s3 cp /tmp/moment_heldout.jsonl "s3://${BUCKET}/moment-heldout-eval/$(date +%Y-%m-%d)/heldout.jsonl"
+            ;;
+          train-moment)
+            # P2：訓練專用動態模型（e5-small 凍結 + logreg head，複用 train_comment_head.py）。
+            # 不連 replica；讀 S3 矯正訓練集 → 切 pos/neg parquet → 訓練 → tar 上 S3。
+            TRAINCSV="${TRAINCSV:-s3://matters-spam-training-samples/moment-trainset/$(date +%Y-%m-%d)/trainset.csv}"
+            # 版本必須與 serving image（spam/requirements.txt）一致,否則存的模型 serving 載不動
+            pip install -q torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+            pip install -q "transformers==4.46.2" "sentence-transformers==3.3.1" "numpy==1.26.4" scikit-learn
+            aws s3 cp "$TRAINCSV" /tmp/trainset.csv
+            python -c "import pandas as pd; df=pd.read_csv('/tmp/trainset.csv'); df[df.is_spam==1][['is_spam','content']].to_parquet('/tmp/pos.parquet'); df[df.is_spam==0][['content']].to_parquet('/tmp/neg.parquet'); print('pos',int((df.is_spam==1).sum()),'neg',int((df.is_spam==0).sum()))"
+            python trains/spam/train_comment_head.py \
+                   --positives /tmp/pos.parquet --negatives /tmp/neg.parquet \
+                   --model intfloat/multilingual-e5-small \
+                   --out-dir /tmp/moment_model --tar /tmp/moment-v1.tar
+            aws s3 cp /tmp/moment-v1.tar "s3://${BUCKET}/moment-model/moment-v1-$(date +%Y%m%d).tar"
+            ;;
+          score-moment)
+            # P3：用訓練好的動態模型對 held-out 打分（雲端,需 torch）。HELDOUT/MODELTAR 用 env 指定。
+            HELDOUT="${HELDOUT:?need HELDOUT s3 uri}"
+            MODELTAR="${MODELTAR:?need MODELTAR s3 uri}"
+            pip install -q torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+            pip install -q "transformers==4.46.2" "sentence-transformers==3.3.1" "numpy==1.26.4"
+            aws s3 cp "$MODELTAR" /tmp/m.tar; mkdir -p /tmp/m; tar xf /tmp/m.tar -C /tmp/m
+            aws s3 cp "$HELDOUT" /tmp/heldout.jsonl
+            python eval/score_moment.py --model-dir /tmp/m --in /tmp/heldout.jsonl --out /tmp/scored.jsonl
+            aws s3 cp /tmp/scored.jsonl "s3://${BUCKET}/moment-p3-scored/$(date +%Y-%m-%d)/scored.jsonl"
             ;;
           *) echo "unknown JOB=$JOB" && exit 1 ;;
         esac
