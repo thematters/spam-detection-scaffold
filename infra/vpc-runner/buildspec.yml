@@ -91,6 +91,17 @@ phases:
                    --out-dir /tmp/moment_model --tar /tmp/moment-v1.tar
             aws s3 cp /tmp/moment-v1.tar "s3://${BUCKET}/moment-model/moment-v1-$(date +%Y%m%d).tar"
             ;;
+          score-moment)
+            # P3：用訓練好的動態模型對 held-out 打分（雲端,需 torch）。HELDOUT/MODELTAR 用 env 指定。
+            HELDOUT="${HELDOUT:?need HELDOUT s3 uri}"
+            MODELTAR="${MODELTAR:?need MODELTAR s3 uri}"
+            pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+            pip install -q sentence-transformers
+            aws s3 cp "$MODELTAR" /tmp/m.tar; mkdir -p /tmp/m; tar xf /tmp/m.tar -C /tmp/m
+            aws s3 cp "$HELDOUT" /tmp/heldout.jsonl
+            python eval/score_moment.py --model-dir /tmp/m/model --in /tmp/heldout.jsonl --out /tmp/scored.jsonl
+            aws s3 cp /tmp/scored.jsonl "s3://${BUCKET}/moment-p3-scored/$(date +%Y-%m-%d)/scored.jsonl"
+            ;;
           *) echo "unknown JOB=$JOB" && exit 1 ;;
         esac
   post_build:
