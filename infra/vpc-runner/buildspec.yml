@@ -84,13 +84,7 @@ phases:
             pip install -q torch --index-url https://download.pytorch.org/whl/cpu
             pip install -q sentence-transformers scikit-learn
             aws s3 cp "$TRAINCSV" /tmp/trainset.csv
-            python - <<'PY'
-import pandas as pd
-df=pd.read_csv('/tmp/trainset.csv')
-df[df.is_spam==1][['is_spam','content']].to_parquet('/tmp/pos.parquet')
-df[df.is_spam==0][['content']].to_parquet('/tmp/neg.parquet')
-print('pos',int((df.is_spam==1).sum()),'neg',int((df.is_spam==0).sum()))
-PY
+            python -c "import pandas as pd; df=pd.read_csv('/tmp/trainset.csv'); df[df.is_spam==1][['is_spam','content']].to_parquet('/tmp/pos.parquet'); df[df.is_spam==0][['content']].to_parquet('/tmp/neg.parquet'); print('pos',int((df.is_spam==1).sum()),'neg',int((df.is_spam==0).sum()))"
             python trains/spam/train_comment_head.py \
                    --positives /tmp/pos.parquet --negatives /tmp/neg.parquet \
                    --model intfloat/multilingual-e5-small \
