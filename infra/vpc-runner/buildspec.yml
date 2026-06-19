@@ -81,8 +81,9 @@ phases:
             # P2：訓練專用動態模型（e5-small 凍結 + logreg head，複用 train_comment_head.py）。
             # 不連 replica；讀 S3 矯正訓練集 → 切 pos/neg parquet → 訓練 → tar 上 S3。
             TRAINCSV="${TRAINCSV:-s3://matters-spam-training-samples/moment-trainset/$(date +%Y-%m-%d)/trainset.csv}"
-            pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-            pip install -q sentence-transformers scikit-learn
+            # 版本必須與 serving image（spam/requirements.txt）一致,否則存的模型 serving 載不動
+            pip install -q torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+            pip install -q "transformers==4.46.2" "sentence-transformers==3.3.1" "numpy==1.26.4" scikit-learn
             aws s3 cp "$TRAINCSV" /tmp/trainset.csv
             python -c "import pandas as pd; df=pd.read_csv('/tmp/trainset.csv'); df[df.is_spam==1][['is_spam','content']].to_parquet('/tmp/pos.parquet'); df[df.is_spam==0][['content']].to_parquet('/tmp/neg.parquet'); print('pos',int((df.is_spam==1).sum()),'neg',int((df.is_spam==0).sum()))"
             python trains/spam/train_comment_head.py \
@@ -95,8 +96,8 @@ phases:
             # P3：用訓練好的動態模型對 held-out 打分（雲端,需 torch）。HELDOUT/MODELTAR 用 env 指定。
             HELDOUT="${HELDOUT:?need HELDOUT s3 uri}"
             MODELTAR="${MODELTAR:?need MODELTAR s3 uri}"
-            pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-            pip install -q sentence-transformers
+            pip install -q torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+            pip install -q "transformers==4.46.2" "sentence-transformers==3.3.1" "numpy==1.26.4"
             aws s3 cp "$MODELTAR" /tmp/m.tar; mkdir -p /tmp/m; tar xf /tmp/m.tar -C /tmp/m
             aws s3 cp "$HELDOUT" /tmp/heldout.jsonl
             python eval/score_moment.py --model-dir /tmp/m --in /tmp/heldout.jsonl --out /tmp/scored.jsonl
