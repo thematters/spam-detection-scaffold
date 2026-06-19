@@ -99,7 +99,7 @@ phases:
             pip install -q sentence-transformers
             aws s3 cp "$MODELTAR" /tmp/m.tar; mkdir -p /tmp/m; tar xf /tmp/m.tar -C /tmp/m
             aws s3 cp "$HELDOUT" /tmp/heldout.jsonl
-            python eval/score_moment.py --model-dir /tmp/m/model --in /tmp/heldout.jsonl --out /tmp/scored.jsonl
+            python eval/score_moment.py --model-dir /tmp/m --in /tmp/heldout.jsonl --out /tmp/scored.jsonl
             aws s3 cp /tmp/scored.jsonl "s3://${BUCKET}/moment-p3-scored/$(date +%Y-%m-%d)/scored.jsonl"
             ;;
           *) echo "unknown JOB=$JOB" && exit 1 ;;
