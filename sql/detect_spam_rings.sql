@@ -39,6 +39,8 @@ rings AS (
     -- 這群作者裡「新帳號」（建立未滿 :new_account_days 天）的比例
     avg((u.created_at >= now() - (:new_account_days || ' days')::interval)::int) AS new_account_ratio,
     array_agg(DISTINCT u.user_name) FILTER (WHERE u.user_name IS NOT NULL)       AS sample_authors,
+    array_agg(DISTINCT ra.author_id)                    AS author_ids,   -- 完整成員（給 app 層 upsert 用）
+    array_agg(DISTINCT ra.id)                           AS article_ids,  -- 該群文章（app 層抓內容做精修）
     min(u.created_at)                                   AS earliest_account,
     max(ra.created_at)                                  AS latest_post
   FROM recent_articles ra
@@ -51,6 +53,8 @@ SELECT
   n_authors,
   round(new_account_ratio::numeric, 2) AS new_account_ratio,
   (sample_authors)[1:10]               AS sample_authors,
+  author_ids,
+  article_ids,
   earliest_account,
   latest_post
 FROM rings
