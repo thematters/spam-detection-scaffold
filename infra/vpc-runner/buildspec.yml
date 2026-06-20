@@ -27,8 +27,8 @@ phases:
       - |
         case "$JOB" in
           ring)
-            # 軸一 D：文章層 ring 偵測（DB 端粗篩；候選寫 S3，不做任何處置）
-            # app 層近似精修沿用 eval/ring_detect_poc.py 的 neardup/username 邏輯（後續工項）。
+            # 軸一 D：文章層 ring 偵測。
+            # 1) DB 端粗篩 → CSV 存證（含 author_ids/article_ids）
             psql "$PG_DSN" -v days="${DAYS:-30}" -v min_authors="${MIN_AUTHORS:-3}" \
                  -v new_account_days="${NEW_ACCOUNT_DAYS:-30}" \
                  -f sql/detect_spam_rings.sql --csv -o /tmp/ring_candidates.csv
@@ -36,6 +36,10 @@ phases:
             # 影子決策（軸一 D 階段一）：產出「若上線會凍結誰」的報告，純記錄不執行任何處置。
             python eval/ring_decide.py /tmp/ring_candidates.csv --out /tmp/ring_shadow.json
             aws s3 cp /tmp/ring_shadow.json "s3://${BUCKET}/article-ring-shadow/$(date +%Y-%m-%d)/decisions.json"
+            # 2) app 層精修（近似/實體/邀請碼/品牌/亂碼）+ 寫回 matters-server upsertSpamRingCandidates。
+            #    影子先行：未設 MATTERS_OSS_GQL_ENDPOINT / MATTERS_OSS_ADMIN_TOKEN 時只印候選、不寫回、不處置。
+            DAYS="${DAYS:-30}" MIN_AUTHORS="${MIN_AUTHORS:-3}" NEW_ACCOUNT_DAYS="${NEW_ACCOUNT_DAYS:-30}" \
+              python scripts/ring_detect_job.py
             ;;
           acceptance)
             # 軸一 B：conformal 定論驗收，從 replica 撈乾淨 held-out ham 打 staging endpoint
