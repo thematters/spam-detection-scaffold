@@ -61,8 +61,8 @@ phases:
             aws s3 cp /tmp/heldout.jsonl "s3://${BUCKET}/heldout-eval/$(date +%Y-%m-%d)/heldout.jsonl"
             ;;
           moment-ring)
-            # 軸一 D（動態版）：moment ring 偵測（DB 端粗篩；候選含 author_ids 供下游標記帳號；不做任何處置）
-            # 「體檢」用——先看現在有多少 ring、長什麼樣。app 層近似精修沿用 ring_detect_poc.py。
+            # 軸一 D（動態版）：moment ring 偵測。流程與文章 ring 段一致（粗篩→影子決策→app 精修寫回）。
+            # 1) DB 端粗篩 → CSV 存證（含 author_ids/moment_ids）
             psql "$PG_DSN" -v days="${DAYS:-30}" -v min_authors="${MIN_AUTHORS:-3}" \
                  -v new_account_days="${NEW_ACCOUNT_DAYS:-30}" \
                  -f sql/detect_spam_rings_moment.sql --csv -o /tmp/moment_ring_candidates.csv
@@ -71,6 +71,10 @@ phases:
             # 影子決策（軸一 D 階段一）：產出「若上線會凍結誰」的報告，純記錄不執行任何處置。
             python eval/ring_decide.py /tmp/moment_ring_candidates.csv --out /tmp/moment_shadow.json
             aws s3 cp /tmp/moment_shadow.json "s3://${BUCKET}/moment-ring-shadow/$(date +%Y-%m-%d)/decisions.json"
+            # 2) app 層精修（近似/實體/邀請碼/品牌/亂碼）+ 寫回 matters-server upsertSpamRingCandidates。
+            #    影子先行：未設 MATTERS_OSS_GQL_ENDPOINT / MATTERS_OSS_ADMIN_TOKEN 時只印候選、不寫回、不處置。
+            CONTENT_TYPE=moment DAYS="${DAYS:-30}" MIN_AUTHORS="${MIN_AUTHORS:-3}" NEW_ACCOUNT_DAYS="${NEW_ACCOUNT_DAYS:-30}" \
+              python scripts/ring_detect_job.py
             ;;
           moment-heldout)
             # 撈動態乾淨 held-out（老帳號 ham + 受限作者 spam）寫 S3，給本地打短內容模型量誤殺/召回。

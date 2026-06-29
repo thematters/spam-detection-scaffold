@@ -11,11 +11,15 @@
   PG_DSN                    read-replica 連線字串（postgresql://...，VPC 內）
   MATTERS_OSS_GQL_ENDPOINT  matters-server GraphQL endpoint（如 https://server.matters.town/graphql）
   MATTERS_OSS_ADMIN_TOKEN   admin service principal token（@auth(mode:admin) 用；header 見 _post_upsert）
+  CONTENT_TYPE              article | moment（預設 article）。決定吃哪支粗篩 SQL、抓哪張表的內容做精修。
   DAYS                      近期窗（預設 30）
   MIN_AUTHORS               同模板最少跨帳號數（預設 3）
   NEW_ACCOUNT_DAYS          新帳號門檻天數（預設 30）
   MAX_ARTICLES_PER_RING     每 ring 精修抓內容上限（預設 200，控記憶體）
   DRY_RUN                   非空＝只印候選不寫回 server
+
+文章與動態 ring 共用 spam_ring 表、靠 fingerprint（正規化模板指紋，兩支 SQL 同口徑）跨層去重，
+故 upsert 是 idempotent；兩者都走同一個 upsertSpamRingCandidates（server 端 nArticles 為通用貼文數）。
 """
 from __future__ import annotations
 
@@ -28,11 +32,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
 import ring_signals  # noqa: E402
 
-SQL_PATH = Path(__file__).resolve().parent.parent / "sql" / "detect_spam_rings.sql"
+SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
 
-CONTENT_QUERY = """
-SELECT a.id AS article_id,
-       a.author_id,
+# 內容型別設定：粗篩 SQL、ring 成員貼文 id 欄、貼文數欄、抓內容的查詢（精修用）。
+# 兩者 content 查詢都回 author_id / author_name / content，detect() 只讀這三欄。
+CONTENT_TYPES = {
+    "article": {
+        "sql": SQL_DIR / "detect_spam_rings.sql",
+        "id_col": "article_ids",
+        "count_col": "n_articles",
+        "content_query": """
+SELECT a.author_id,
        u.user_name AS author_name,
        coalesce(av.title,'') || ' ' || coalesce(ac.content,'') AS content
 FROM article a
@@ -40,7 +50,22 @@ JOIN article_version_newest av ON av.article_id = a.id
 JOIN article_content ac        ON ac.id = av.content_id
 JOIN "user" u                  ON u.id = a.author_id
 WHERE a.id = ANY(%(ids)s)
-"""
+""",
+    },
+    "moment": {
+        "sql": SQL_DIR / "detect_spam_rings_moment.sql",
+        "id_col": "moment_ids",
+        "count_col": "n_moments",
+        "content_query": """
+SELECT m.author_id,
+       u.user_name AS author_name,
+       coalesce(m.content, '') AS content
+FROM moment m
+JOIN "user" u ON u.id = m.author_id
+WHERE m.id = ANY(%(ids)s)
+""",
+    },
+}
 
 UPSERT_MUTATION = """
 mutation Upsert($input: UpsertSpamRingCandidatesInput!) {
@@ -88,17 +113,21 @@ def assemble_signals(items: list) -> dict:
     }
 
 
-def build_candidate(row: dict, items: list) -> dict:
-    """組一筆 upsert candidate（純函式，可測）。row 來自 detect_spam_rings.sql。"""
+def build_candidate(row: dict, items: list, count_col: str = "n_articles") -> dict:
+    """組一筆 upsert candidate（純函式，可測）。row 來自 detect_spam_rings[_moment].sql。
+    count_col：貼文數欄位名（文章＝n_articles、動態＝n_moments）→ 一律映到 server 的 nArticles（通用貼文數）。"""
     signals = assemble_signals(items)
     ring_size = max(signals["nearDupRingSize"], signals["entityRingSize"])
     score = round(ring_size + row["n_authors"] * signals["botUsernameRatio"], 4)
     ratio = row.get("new_account_ratio")
+    n_posts = row.get(count_col)
+    if n_posts is None:
+        n_posts = row.get("n_articles") or row.get("n_moments") or 0
     return {
         "fingerprint": row["template_fam"],
         "memberUserIds": [str(x) for x in (row.get("author_ids") or [])],
         "signals": signals,
-        "nArticles": int(row["n_articles"]),
+        "nArticles": int(n_posts),
         "nAuthors": int(row["n_authors"]),
         "newAccountRatio": float(ratio) if ratio is not None else None,
         "score": score,
@@ -106,9 +135,9 @@ def build_candidate(row: dict, items: list) -> dict:
     }
 
 
-def _load_sql(days: int, min_authors: int, new_account_days: int) -> str:
-    """讀 detect_spam_rings.sql，把 psql 風格 :var 換成驗證過的整數（給 psycopg 直接執行）。"""
-    sql = SQL_PATH.read_text()
+def _load_sql(sql_path: Path, days: int, min_authors: int, new_account_days: int) -> str:
+    """讀粗篩 SQL，把 psql 風格 :var 換成驗證過的整數（給 psycopg 直接執行）。"""
+    sql = sql_path.read_text()
     for name, val in (
         ("new_account_days", int(new_account_days)),  # 先換較長的，避免子字串相撞
         ("min_authors", int(min_authors)),
@@ -118,29 +147,29 @@ def _load_sql(days: int, min_authors: int, new_account_days: int) -> str:
     return sql
 
 
-def detect(conn, *, days: int, min_authors: int, new_account_days: int,
-           max_articles: int) -> list:
-    import psycopg
+def detect(conn, *, content_type: str, days: int, min_authors: int,
+           new_account_days: int, max_articles: int) -> list:
     from psycopg.rows import dict_row
 
+    spec = CONTENT_TYPES[content_type]
     rings: list = []
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(_load_sql(days, min_authors, new_account_days))
+        cur.execute(_load_sql(spec["sql"], days, min_authors, new_account_days))
         candidates = cur.fetchall()
     for row in candidates:
-        article_ids = (row.get("article_ids") or [])[:max_articles]
-        if not article_ids:
+        post_ids = (row.get(spec["id_col"]) or [])[:max_articles]
+        if not post_ids:
             continue
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(CONTENT_QUERY, {"ids": list(article_ids)})
-            arts = cur.fetchall()
+            cur.execute(spec["content_query"], {"ids": list(post_ids)})
+            posts = cur.fetchall()
         items = [
-            {"content": a["content"] or "", "author": a["author_name"] or str(a["author_id"])}
-            for a in arts
+            {"content": p["content"] or "", "author": p["author_name"] or str(p["author_id"])}
+            for p in posts
         ]
         if not items:
             continue
-        rings.append(build_candidate(row, items))
+        rings.append(build_candidate(row, items, count_col=spec["count_col"]))
     return rings
 
 
@@ -166,6 +195,11 @@ def _post_upsert(endpoint: str, token: str, candidates: list) -> dict:
 
 
 def main() -> int:
+    content_type = os.environ.get("CONTENT_TYPE", "article")
+    if content_type not in CONTENT_TYPES:
+        print(f"CONTENT_TYPE must be one of {sorted(CONTENT_TYPES)}; got {content_type!r}",
+              file=sys.stderr)
+        return 2
     days = int(os.environ.get("DAYS", "30"))
     min_authors = int(os.environ.get("MIN_AUTHORS", "3"))
     new_account_days = int(os.environ.get("NEW_ACCOUNT_DAYS", "30"))
@@ -181,12 +215,13 @@ def main() -> int:
     with psycopg.connect(dsn) as conn:
         candidates = detect(
             conn,
+            content_type=content_type,
             days=days,
             min_authors=min_authors,
             new_account_days=new_account_days,
             max_articles=max_articles,
         )
-    print(f"detected {len(candidates)} ring candidate(s)")
+    print(f"detected {len(candidates)} {content_type} ring candidate(s)")
 
     if dry_run:
         print(json.dumps(candidates, ensure_ascii=False, indent=2)[:4000])

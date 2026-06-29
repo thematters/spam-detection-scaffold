@@ -41,6 +41,7 @@ rings AS (
     array_agg(DISTINCT u.user_name) FILTER (WHERE u.user_name IS NOT NULL)       AS sample_authors,
     -- 下游「標記帳號為 spam」用：候選 ring 的全部作者 id（去重）
     array_agg(DISTINCT rm.author_id)                    AS author_ids,
+    array_agg(DISTINCT rm.id)                           AS moment_ids,  -- 該群動態（app 層抓 content 做精修）
     min(u.created_at)                                   AS earliest_account,
     max(rm.created_at)                                  AS latest_post
   FROM recent_moments rm
@@ -54,6 +55,7 @@ SELECT
   round(new_account_ratio::numeric, 2) AS new_account_ratio,
   (sample_authors)[1:10]               AS sample_authors,
   author_ids,
+  moment_ids,
   earliest_account,
   latest_post
 FROM rings
