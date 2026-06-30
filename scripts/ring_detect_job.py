@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -33,6 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
 import ring_signals  # noqa: E402
 
 SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+TAG_RE = re.compile(r"<[^>]+>")
+URL_RE = re.compile(r"https?://\S+")
+WS_RE = re.compile(r"\s+")
 
 # 內容型別設定：粗篩 SQL、ring 成員貼文 id 欄、貼文數欄、抓內容的查詢（精修用）。
 # 兩者 content 查詢都回 author_id / author_name / content，detect() 只讀這三欄。
@@ -86,6 +90,27 @@ def _severity_of(score: float) -> str:
     return "low"
 
 
+def _sample_texts(items: list, *, limit: int = 5, chars: int = 36) -> list[str]:
+    samples: list[str] = []
+    seen = set()
+    for item in items:
+        text = item.get("content") or ""
+        text = TAG_RE.sub(" ", text)
+        text = URL_RE.sub(" ", text)
+        text = WS_RE.sub(" ", text).strip()
+        if not text:
+            continue
+        sample = text[:chars]
+        key = sample.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        samples.append(sample)
+        if len(samples) >= limit:
+            break
+    return samples
+
+
 def assemble_signals(items: list) -> dict:
     """對一個 ring 的 [{content, author}] 算 app 層訊號摘要（純函式，可測）。"""
     texts = [it["content"] for it in items]
@@ -109,6 +134,7 @@ def assemble_signals(items: list) -> dict:
         "botUsernameRatio": round(bot_ratio, 4),
         "sampleCodes": sorted(codes)[:10],
         "sampleBrands": sorted(brands)[:10],
+        "sampleTexts": _sample_texts(items),
         "contentModelMax": None,
     }
 
