@@ -149,6 +149,19 @@ def test_merge_by_fingerprint_unions_members_and_signals():
     assert merged["newAccountRatio"] == 0.9  # max
 
 
+def test_empty_content_maps_to_empty_fingerprint_and_is_skippable():
+    # md5("") 前 8 碼；純圖/emoji/url/空白/HTML-only 都正規化成空 → 同一個空指紋
+    assert ring_signals.EMPTY_FINGERPRINT == "d41d8cd9"
+    for txt in ["", "   \n  ", "🎰🎰", "https://x.com/a", "<p></p>", "@user"]:
+        assert ring_signals.normalized_fingerprint(txt) == ring_signals.EMPTY_FINGERPRINT
+    # build_candidate 對純空白/emoji 內容 → 空指紋（detect 會據此跳過，不成假 ring）
+    row = {"template_fam": "x", "n_articles": 5, "n_authors": 5,
+           "new_account_ratio": 1.0, "author_ids": [1, 2, 3, 4, 5]}
+    c = build_candidate(row, [{"content": "🎰", "author": "a"},
+                              {"content": "   ", "author": "b"}])
+    assert c["fingerprint"] == ring_signals.EMPTY_FINGERPRINT
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

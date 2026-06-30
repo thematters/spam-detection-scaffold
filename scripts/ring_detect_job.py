@@ -215,7 +215,12 @@ def detect(conn, *, content_type: str, days: int, min_authors: int,
         ]
         if not items:
             continue
-        rings.append(build_candidate(row, items, count_col=spec["count_col"]))
+        cand = build_candidate(row, items, count_col=spec["count_col"])
+        if cand["fingerprint"] == ring_signals.EMPTY_FINGERPRINT:
+            # 內容正規化後為空（純圖/emoji/url/空白貼文）→ 無文字模板可比對，
+            # 不成 ring（否則會把不相干的帳號全擠成一個假群，如 d41d8cd9）。
+            continue
+        rings.append(cand)
     return _merge_by_fingerprint(rings)
 
 
