@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 import sys
@@ -123,8 +124,14 @@ def build_candidate(row: dict, items: list, count_col: str = "n_articles") -> di
     n_posts = row.get(count_col)
     if n_posts is None:
         n_posts = row.get("n_articles") or row.get("n_moments") or 0
+    # 用強化正規化指紋（繁簡/emoji/空白無關）當分群鍵，取 ring 內最常見的那個；
+    # detect() 之後再把同指紋的候選合併，避免同內容散成多個 ring。
+    fps = [ring_signals.normalized_fingerprint(it.get("content", "")) for it in items]
+    fingerprint = (
+        collections.Counter(fps).most_common(1)[0][0] if fps else row["template_fam"]
+    )
     return {
-        "fingerprint": row["template_fam"],
+        "fingerprint": fingerprint,
         "memberUserIds": [str(x) for x in (row.get("author_ids") or [])],
         "signals": signals,
         "nArticles": int(n_posts),
@@ -133,6 +140,45 @@ def build_candidate(row: dict, items: list, count_col: str = "n_articles") -> di
         "score": score,
         "severity": _severity_of(score),
     }
+
+
+def _merge_by_fingerprint(cands: list) -> list:
+    """把正規化指紋相同的候選 ring 合併成一筆（純函式，可測）：
+    union 成員、重算 nAuthors、加總貼文數、合併訊號（ring size 取 max、codes/brands 取聯集）。"""
+    by_fp: dict = {}
+    for c in cands:
+        by_fp.setdefault(c["fingerprint"], []).append(c)
+    out = []
+    for fp, group in by_fp.items():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        member_ids = sorted({m for c in group for m in c["memberUserIds"]})
+        sigs = [c["signals"] for c in group]
+        merged_sig = {
+            "nearDupRingSize": max(s.get("nearDupRingSize", 0) for s in sigs),
+            "entityRingSize": max(s.get("entityRingSize", 0) for s in sigs),
+            "topEntity": next((s.get("topEntity") for s in sigs if s.get("topEntity")), None),
+            "botUsernameRatio": max(s.get("botUsernameRatio", 0.0) for s in sigs),
+            "sampleCodes": sorted({x for s in sigs for x in (s.get("sampleCodes") or [])})[:10],
+            "sampleBrands": sorted({x for s in sigs for x in (s.get("sampleBrands") or [])})[:10],
+            "contentModelMax": None,
+        }
+        ratios = [c["newAccountRatio"] for c in group if c.get("newAccountRatio") is not None]
+        n_posts = sum(int(c.get("nArticles") or 0) for c in group)
+        ring_size = max(merged_sig["nearDupRingSize"], merged_sig["entityRingSize"])
+        score = round(ring_size + len(member_ids) * merged_sig["botUsernameRatio"], 4)
+        out.append({
+            "fingerprint": fp,
+            "memberUserIds": member_ids,
+            "signals": merged_sig,
+            "nArticles": n_posts,
+            "nAuthors": len(member_ids),
+            "newAccountRatio": max(ratios) if ratios else None,
+            "score": score,
+            "severity": _severity_of(score),
+        })
+    return out
 
 
 def _load_sql(sql_path: Path, days: int, min_authors: int, new_account_days: int) -> str:
@@ -170,7 +216,7 @@ def detect(conn, *, content_type: str, days: int, min_authors: int,
         if not items:
             continue
         rings.append(build_candidate(row, items, count_col=spec["count_col"]))
-    return rings
+    return _merge_by_fingerprint(rings)
 
 
 def _post_upsert(endpoint: str, token: str, candidates: list) -> dict:

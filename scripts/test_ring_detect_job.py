@@ -7,10 +7,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ring_detect_job import (  # noqa: E402
     CONTENT_TYPES,
     _load_sql,
+    _merge_by_fingerprint,
     assemble_signals,
     build_candidate,
     _severity_of,
 )
+import ring_signals  # noqa: E402  (eval/ 已被 ring_detect_job 加進 sys.path)
 
 
 def test_assemble_signals_picks_up_codes_and_brands():
@@ -41,7 +43,8 @@ def test_build_candidate_maps_row_and_member_ids():
         {"content": "玩 28BET 就对了", "author": "cccc3333"},
     ]
     c = build_candidate(row, items)
-    assert c["fingerprint"] == "abc12345"
+    # fingerprint 改由內容算（正規化），不再是 raw template_fam
+    assert c["fingerprint"] != "abc12345" and len(c["fingerprint"]) == 8
     assert c["memberUserIds"] == ["101", "102", "103"]  # 原始 DB id 轉字串
     assert c["nArticles"] == 9 and c["nAuthors"] == 3
     assert c["newAccountRatio"] == 0.9
@@ -89,6 +92,61 @@ def test_load_sql_substitutes_moment_sql():
     sql = _load_sql(CONTENT_TYPES["moment"]["sql"], days=30, min_authors=3, new_account_days=30)
     assert ":days" not in sql and ":min_authors" not in sql and ":new_account_days" not in sql
     assert "moment_ids" in sql  # 確保有輸出貼文 id 欄，否則 app 層抓不到內容
+
+
+def test_normalized_fingerprint_collapses_emoji_and_whitespace():
+    a = ring_signals.normalized_fingerprint("28BET 注册送 🎰🎰")
+    b = ring_signals.normalized_fingerprint("28bet注册送")
+    assert a == b  # emoji / 空白 / 大小寫無關
+    assert len(a) == 8
+    assert ring_signals.normalized_fingerprint("hello") != ring_signals.normalized_fingerprint(
+        "buy crypto"
+    )  # 真的不同內容 → 不同指紋
+
+
+def test_normalized_fingerprint_collapses_traditional_simplified():
+    try:
+        import opencc  # noqa: F401
+    except Exception:  # opencc 為選用相依（buildspec 已裝）；本地缺席時略過，CI 會驗
+        return
+    assert ring_signals.normalized_fingerprint(
+        "註冊送優惠"
+    ) == ring_signals.normalized_fingerprint("注册送优惠")
+
+
+def test_merge_by_fingerprint_unions_members_and_signals():
+    def cand(fp, ids, sig, n_posts, ratio):
+        return {
+            "fingerprint": fp,
+            "memberUserIds": ids,
+            "signals": sig,
+            "nArticles": n_posts,
+            "nAuthors": len(ids),
+            "newAccountRatio": ratio,
+            "score": 1,
+            "severity": "low",
+        }
+
+    a = cand("fp1", ["1", "2"], {"nearDupRingSize": 3, "entityRingSize": 0,
+             "topEntity": None, "botUsernameRatio": 0.2, "sampleCodes": ["A"],
+             "sampleBrands": []}, 3, 0.5)
+    b = cand("fp1", ["2", "3"], {"nearDupRingSize": 1, "entityRingSize": 5,
+             "topEntity": "28bet.com", "botUsernameRatio": 0.6, "sampleCodes": ["B"],
+             "sampleBrands": ["x"]}, 2, 0.9)
+    d = cand("fp2", ["9"], {"nearDupRingSize": 1, "entityRingSize": 0,
+             "topEntity": None, "botUsernameRatio": 0.0, "sampleCodes": [],
+             "sampleBrands": []}, 1, 0.1)
+
+    out = _merge_by_fingerprint([a, b, d])
+    assert len(out) == 2  # fp1 兩筆合一、fp2 不動
+    merged = next(c for c in out if c["fingerprint"] == "fp1")
+    assert merged["memberUserIds"] == ["1", "2", "3"]  # union + sorted
+    assert merged["nAuthors"] == 3 and merged["nArticles"] == 5  # 重算 / 加總
+    assert merged["signals"]["nearDupRingSize"] == 3  # max
+    assert merged["signals"]["entityRingSize"] == 5  # max
+    assert merged["signals"]["topEntity"] == "28bet.com"
+    assert set(merged["signals"]["sampleCodes"]) == {"A", "B"}  # 聯集
+    assert merged["newAccountRatio"] == 0.9  # max
 
 
 if __name__ == "__main__":
