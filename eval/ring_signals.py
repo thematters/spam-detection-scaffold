@@ -32,6 +32,42 @@ def template_family(text: str) -> str:
     return hashlib.md5(_norm(text)[:200].encode()).hexdigest()[:8]
 
 
+# --- 強化正規化指紋（app 層 re-cluster 用）：在 _norm 之上再吃繁簡、emoji、所有空白 ---
+try:  # opencc 為選用相依（buildspec 已裝）；缺席時優雅退化（指紋仍可用，只是不吃繁簡）
+    from opencc import OpenCC as _OpenCC
+
+    _t2s = _OpenCC("t2s")
+
+    def _to_simplified(s: str) -> str:
+        return _t2s.convert(s or "")
+
+except Exception:  # noqa: BLE001
+
+    def _to_simplified(s: str) -> str:
+        return s or ""
+
+
+# 常見 emoji / 變體選擇符 / ZWJ 的 unicode 區段
+_emoji = re.compile(
+    "[\U0001f000-\U0001faff\U00002600-\U000027bf\U0001f1e6-\U0001f1ff"
+    "\U00002190-\U000021ff\U00002b00-\U00002bff️‍]"
+)
+_all_ws = re.compile(r"\s+")
+
+
+def normalized_template(text: str) -> str:
+    """比 _norm 更狠：先繁→簡，再遮 url/handle/數字、去 emoji、去掉所有空白。
+    讓『同內容但繁簡／空白／emoji 不同』的貼文收斂到同一模板，避免散成多個 ring。"""
+    t = _norm(_to_simplified(text))  # 繁→簡 → 小寫+去html+遮url/handle/數字+收斂空白
+    t = _emoji.sub("", t)
+    return _all_ws.sub("", t)  # 去掉所有空白（含換行）
+
+
+def normalized_fingerprint(text: str) -> str:
+    """繁簡／emoji／空白無關的模板指紋（取代 template_family 當 ring 分群鍵）。"""
+    return hashlib.md5(normalized_template(text)[:200].encode()).hexdigest()[:8]
+
+
 # --- 廣告實體（跨帳號不變量）---
 _domain = re.compile(r"\b([a-z0-9-]+\.(?:com|net|cc|tv|xyz|top|vip|me|io|app|live|info))\b", re.I)
 _contact = re.compile(
