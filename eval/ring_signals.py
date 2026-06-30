@@ -68,6 +68,11 @@ def normalized_fingerprint(text: str) -> str:
     return hashlib.md5(normalized_template(text)[:200].encode()).hexdigest()[:8]
 
 
+# 內容正規化後為空（純圖／emoji／url／空白貼文）的指紋＝md5("")。
+# 這種「無文字模板」不該成 ring（會把不相干的帳號全擠成一個假群）。
+EMPTY_FINGERPRINT = normalized_fingerprint("")
+
+
 # --- 廣告實體（跨帳號不變量）---
 _domain = re.compile(r"\b([a-z0-9-]+\.(?:com|net|cc|tv|xyz|top|vip|me|io|app|live|info))\b", re.I)
 _contact = re.compile(
