@@ -29,6 +29,20 @@ def test_assemble_signals_picks_up_codes_and_brands():
     assert 0.0 <= sig["botUsernameRatio"] <= 1.0
 
 
+def test_assemble_signals_includes_readable_sample_texts():
+    items = [
+        {"content": "<p>老燈律師翻譯社 邀請碼 LIDANG</p> https://example.com/a", "author": "a"},
+        {"content": "<p>老燈律師翻譯社 邀請碼 LIDANG</p> https://example.com/a", "author": "b"},
+        {"content": "加拿大翻譯社 免費諮詢 line", "author": "c"},
+    ]
+    sig = assemble_signals(items)
+    assert sig["sampleTexts"] == [
+        "老燈律師翻譯社 邀請碼 LIDANG",
+        "加拿大翻譯社 免費諮詢 line",
+    ]
+    assert all("http" not in sample and "<" not in sample for sample in sig["sampleTexts"])
+
+
 def test_build_candidate_maps_row_and_member_ids():
     row = {
         "template_fam": "abc12345",
