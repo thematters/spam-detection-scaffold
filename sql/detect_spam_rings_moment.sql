@@ -45,7 +45,9 @@ rings AS (
     min(u.created_at)                                   AS earliest_account,
     max(rm.created_at)                                  AS latest_post
   FROM recent_moments rm
+  -- 只算「還沒處理」的作者：排除已 frozen/banned/archived 的帳號（避免凍結後同批人反覆成新 ring、重工）
   JOIN "user" u ON u.id = rm.author_id
+                AND u.state NOT IN ('banned', 'frozen', 'archived')
   GROUP BY rm.template_fam
 )
 SELECT
