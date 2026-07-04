@@ -164,7 +164,9 @@ def test_merge_by_fingerprint_unions_members_and_signals():
     assert merged["signals"]["entityRingSize"] == 5  # max
     assert merged["signals"]["topEntity"] == "28bet.com"
     assert set(merged["signals"]["sampleCodes"]) == {"A", "B"}  # 聯集
-    assert merged["newAccountRatio"] == 0.9  # max
+    # 審查 F2：加權平均（各 2 帳號 → (0.5*2+0.9*2)/4），不再取 max——
+    # 否則老帳號群＋新帳號群合併後整包看起來全新、被拖進自動凍結
+    assert merged["newAccountRatio"] == 0.7
 
 
 def test_empty_content_maps_to_empty_fingerprint_and_is_skippable():
@@ -249,9 +251,11 @@ def test_auto_freeze_eligible_double_key():
 
 def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
     calls = []
+    freeze_member_args = {}
 
-    def fake_freeze(endpoint, token, ring_id, remark):
+    def fake_freeze(endpoint, token, ring_id, remark, member_user_ids=None):
         calls.append(ring_id)
+        freeze_member_args[ring_id] = member_user_ids
         if ring_id == "boom":
             raise RuntimeError("simulated")
         return {"frozen": [{"id": "u1"}], "skipped": []}
@@ -259,17 +263,23 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
     orig = ring_detect_job._post_freeze
     ring_detect_job._post_freeze = fake_freeze
     try:
-        def cand(fp):
-            return {"fingerprint": fp, "nAuthors": 5, "newAccountRatio": 1.0,
-                    "signals": {"botUsernameRatio": 0.6}}
+        def cand(fp, **over):
+            base = {"fingerprint": fp, "nAuthors": 5, "newAccountRatio": 1.0,
+                    "signals": {"botUsernameRatio": 0.6},
+                    "_verifiedMemberIds": ["11", "12", "13", "14", "15"]}
+            base.update(over)
+            return base
         candidates = [cand("f1"), cand("f2"), cand("f3"), cand("f4"),
-                      {"fingerprint": "f5", "nAuthors": 1, "newAccountRatio": 1.0,
-                       "signals": {"botUsernameRatio": 1.0}}]  # F1a 單帳號：不合格
+                      cand("f5", nAuthors=1, _verifiedMemberIds=["9"]),  # F1a 單帳號：不合格
+                      cand("f6", _truncated=True),                # 截斷 → 降級人工
+                      cand("f7", _verifiedMemberIds=["21", "22"])]  # 驗證成員 <3 → 降級人工
         rings = [
             {"id": "r1", "fingerprint": "f1", "status": "pending"},
             {"id": "r2", "fingerprint": "f2", "status": "dismissed"},  # 人工判過誤判 → 不碰
             {"id": "r3", "fingerprint": "f3", "status": "restored"},   # 人工解凍過 → 不碰
             {"id": "boom", "fingerprint": "f4", "status": "pending"},  # 失敗不擋整批
+            {"id": "r6", "fingerprint": "f6", "status": "pending"},
+            {"id": "r7", "fingerprint": "f7", "status": "pending"},
         ]
         s = auto_freeze("http://x", "t", candidates, rings,
                         {"high_authors": 3, "new_ratio_hi": 0.8,
@@ -277,10 +287,46 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
     finally:
         ring_detect_job._post_freeze = orig
 
-    assert calls == ["r1", "boom"]  # dismissed/restored/單帳號 全都沒被呼叫
+    assert calls == ["r1", "boom"]  # dismissed/restored/單帳號/截斷/低驗證 全都沒被呼叫
     assert [f["ring_id"] for f in s["frozen"]] == ["r1"]
     assert {x["status"] for x in s["skipped_status"]} == {"dismissed", "restored"}
     assert s["ineligible"] == 1 and len(s["errors"]) == 1
+    # 審查 F1：截斷與驗證不足各自降級、凍結呼叫帶交集名單
+    assert {x["fingerprint"] for x in s["skipped_unverified"]} == {"f6", "f7"}
+    assert freeze_member_args == {"r1": ["11", "12", "13", "14", "15"],
+                                  "boom": ["11", "12", "13", "14", "15"]}
+
+
+def test_strip_internal_keys_removes_underscore_fields():
+    from ring_detect_job import strip_internal_keys
+
+    cands = [{"fingerprint": "f", "memberUserIds": ["1"], "nAuthors": 1,
+              "_verifiedMemberIds": ["1"], "_truncated": True}]
+    out = strip_internal_keys(cands)
+    assert out == [{"fingerprint": "f", "memberUserIds": ["1"], "nAuthors": 1}]
+    assert "_verifiedMemberIds" in cands[0]  # 原件不動（auto_freeze 還要用）
+
+
+def test_merge_unions_verified_members_and_truncated_flag():
+    def cand(fp, ids, verified=None, truncated=False):
+        c = {"fingerprint": fp, "memberUserIds": ids,
+             "signals": {"nearDupRingSize": 1, "entityRingSize": 0, "topEntity": None,
+                         "botUsernameRatio": 0.0, "sampleCodes": [], "sampleBrands": []},
+             "nArticles": 1, "nAuthors": len(ids), "newAccountRatio": 1.0,
+             "score": 1, "severity": "low"}
+        if verified:
+            c["_verifiedMemberIds"] = verified
+        if truncated:
+            c["_truncated"] = True
+        return c
+
+    out = _merge_by_fingerprint([
+        cand("fp", ["1", "2"], verified=["1"]),
+        cand("fp", ["3"], verified=["3"], truncated=True),
+    ])
+    assert len(out) == 1
+    assert out[0]["_verifiedMemberIds"] == ["1", "3"]  # 聯集
+    assert out[0]["_truncated"] is True  # 任一群截斷 → 整體降級
 
 
 def test_load_sql_substitutes_single_author_min_posts():

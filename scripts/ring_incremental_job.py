@@ -41,6 +41,7 @@ from ring_detect_job import (  # noqa: E402
     auto_freeze_eligible,
     build_candidate,
     filter_empty_members,
+    strip_internal_keys,
     _merge_by_fingerprint,
     _post_upsert,
 )
@@ -315,7 +316,13 @@ def main() -> int:
             row, items = filter_empty_members(row, items, spec["count_col"])
             if int(row.get("n_authors") or 0) <= 0 or not items:
                 continue
-            candidates.append(build_candidate(row, items, count_col=spec["count_col"]))
+            cand = build_candidate(row, items, count_col=spec["count_col"])
+            # 審查 F1/F3：凍結只准碰「本輪從 DB 抓回內容驗證過」的成員——
+            # state 檔宣稱的成員（可能被汙染或過期）不進凍結名單；截斷降級人工。
+            cand["_verifiedMemberIds"] = sorted({str(it["author_id"]) for it in items})
+            if len(g["post_ids"]) > max_articles:
+                cand["_truncated"] = True
+            candidates.append(cand)
     candidates = _merge_by_fingerprint(candidates)
     print(f"{len(candidates)} candidate(s) touched by new posts")
 
@@ -342,7 +349,8 @@ def main() -> int:
         print(json.dumps(candidates, ensure_ascii=False)[:2000])
         commit_state()
         return 0
-    result = _post_upsert(endpoint, token, candidates, with_rings=auto_freeze_on)
+    result = _post_upsert(endpoint, token, strip_internal_keys(candidates),
+                          with_rings=auto_freeze_on)
     print(f"upserted: {json.dumps({k: v for k, v in result.items() if k != 'rings'})}")
     commit_state()
     if auto_freeze_on:
