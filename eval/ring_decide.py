@@ -21,7 +21,7 @@
 
 用法：
   python ring_decide.py candidates.csv [--out shadow_decisions.json]
-  # 門檻可調：--high-authors 5 --new-ratio-hi 0.8 --bot-ratio-hi 0.5 --old-exempt-ratio 0.34 --min-authors 3
+  # 門檻可調：--high-authors 3 --new-ratio-hi 0.8 --bot-ratio-hi 0.5 --old-exempt-ratio 0.34 --min-authors 3
 """
 from __future__ import annotations
 import argparse
@@ -106,7 +106,8 @@ def main(argv) -> int:
     ap.add_argument("csv", help="ring 候選 CSV（detect_spam_rings[_moment].sql 的輸出）")
     ap.add_argument("--out", help="影子決策 JSON 輸出路徑")
     ap.add_argument("--min-authors", type=int, default=3, help="列為 ring 的最低跨帳號數")
-    ap.add_argument("--high-authors", type=int, default=5, help="FREEZE 鑰1：跨帳號數門檻")
+    ap.add_argument("--high-authors", type=int, default=3,
+                    help="FREEZE 鑰1：跨帳號數門檻（SPEC_RING_V2 F1b：5→3）")
     ap.add_argument("--new-ratio-hi", type=float, default=0.8, help="FREEZE 鑰2a：新帳號比例門檻")
     ap.add_argument("--bot-ratio-hi", type=float, default=0.5, help="FREEZE 鑰2b：亂碼帳號比例門檻")
     ap.add_argument("--old-exempt-ratio", type=float, default=0.34,

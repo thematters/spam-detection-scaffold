@@ -9,9 +9,13 @@ from ring_detect_job import (  # noqa: E402
     _load_sql,
     _merge_by_fingerprint,
     assemble_signals,
+    auto_freeze,
+    auto_freeze_eligible,
     build_candidate,
+    filter_empty_members,
     _severity_of,
 )
+import ring_detect_job  # noqa: E402  (auto_freeze 測試要 monkeypatch _post_freeze)
 import ring_signals  # noqa: E402  (eval/ 已被 ring_detect_job 加進 sys.path)
 
 
@@ -174,6 +178,124 @@ def test_empty_content_maps_to_empty_fingerprint_and_is_skippable():
     c = build_candidate(row, [{"content": "🎰", "author": "a"},
                               {"content": "   ", "author": "b"}])
     assert c["fingerprint"] == ring_signals.EMPTY_FINGERPRINT
+
+
+def test_filter_empty_members_drops_image_only_member():
+    """F3a：混合 ring 裡「貼文全為純圖/無內文」的成員被剔除，計數與新帳號比以剩餘成員重算。"""
+    row = {"template_fam": "x", "n_moments": 5, "n_authors": 3,
+           "new_account_ratio": 0.67, "author_ids": [1, 2, 3]}
+    items = [
+        # 成員 1、2：真 spam 模板（新帳號）
+        {"content": "28BET 注册送", "author": "a1", "author_id": 1, "is_new_account": True},
+        {"content": "28BET 注册送", "author": "a2", "author_id": 2, "is_new_account": True},
+        # 成員 3：老帳號，只分享圖片（HTML figure，無文字）×2 —— 被 SQL 粗篩湊進來的真人
+        {"content": "<figure><img src='x.png'></figure>", "author": "olduser",
+         "author_id": 3, "is_new_account": False},
+        {"content": "<figure><img src='y.png'></figure>", "author": "olduser",
+         "author_id": 3, "is_new_account": False},
+    ]
+    # 原 row 假設 n_moments=5（含一則沒抓到的）；成員 3 兩則被剔 → 5-2=3
+    row2, items2 = filter_empty_members(row, items, "n_moments")
+    assert row2["author_ids"] == [1, 2]
+    assert row2["n_authors"] == 2
+    assert row2["n_moments"] == 3
+    assert row2["new_account_ratio"] == 1.0  # 剩餘成員全是新帳號（重算）
+    assert all(str(it["author_id"]) != "3" for it in items2)
+    # 原 row 不被就地修改
+    assert row["author_ids"] == [1, 2, 3] and row["n_authors"] == 3
+
+
+def test_filter_empty_members_keeps_member_with_any_text_post():
+    """成員只要有任一則有文字的貼文就保留（不是逐貼文剔除，是逐成員判斷）。"""
+    row = {"template_fam": "x", "n_articles": 2, "n_authors": 1,
+           "new_account_ratio": 0.0, "author_ids": [7]}
+    items = [
+        {"content": "🎰", "author": "u7", "author_id": 7, "is_new_account": False},
+        {"content": "真的有寫字", "author": "u7", "author_id": 7, "is_new_account": False},
+    ]
+    row2, items2 = filter_empty_members(row, items, "n_articles")
+    assert row2 is row and items2 is items  # 無成員被剔 → 原樣返回
+
+
+def test_filter_empty_members_all_empty_ring_collapses_to_zero():
+    row = {"template_fam": "x", "n_moments": 2, "n_authors": 2,
+           "new_account_ratio": 0.0, "author_ids": [1, 2]}
+    items = [
+        {"content": "<p></p>", "author": "a", "author_id": 1, "is_new_account": False},
+        {"content": "  ", "author": "b", "author_id": 2, "is_new_account": False},
+    ]
+    row2, items2 = filter_empty_members(row, items, "n_moments")
+    assert row2["n_authors"] == 0 and items2 == []  # detect() 據此整 ring 丟棄
+
+
+def test_auto_freeze_eligible_double_key():
+    def cand(n, ratio, bot):
+        return {"nAuthors": n, "newAccountRatio": ratio,
+                "signals": {"botUsernameRatio": bot}}
+    # 雙鑰成立：跨 3 帳號（F1b 門檻）＋新帳號比高
+    assert auto_freeze_eligible(cand(3, 0.9, 0.0))
+    # 雙鑰成立：亂碼比高
+    assert auto_freeze_eligible(cand(5, 0.5, 0.6))
+    # 鑰1 不足（單帳號 F1a 候選天然不合格）
+    assert not auto_freeze_eligible(cand(1, 1.0, 1.0))
+    assert not auto_freeze_eligible(cand(2, 1.0, 1.0))
+    # 老帳號豁免（硬性）：新帳號比低且亂碼低 → 永不自動
+    assert not auto_freeze_eligible(cand(40, 0.1, 0.1))
+    # 佐證鑰不足：新帳號比中等、亂碼低
+    assert not auto_freeze_eligible(cand(10, 0.5, 0.1))
+    # 資料缺席即否決
+    assert not auto_freeze_eligible(cand(10, None, 0.9))
+
+
+def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
+    calls = []
+
+    def fake_freeze(endpoint, token, ring_id, remark):
+        calls.append(ring_id)
+        if ring_id == "boom":
+            raise RuntimeError("simulated")
+        return {"frozen": [{"id": "u1"}], "skipped": []}
+
+    orig = ring_detect_job._post_freeze
+    ring_detect_job._post_freeze = fake_freeze
+    try:
+        def cand(fp):
+            return {"fingerprint": fp, "nAuthors": 5, "newAccountRatio": 1.0,
+                    "signals": {"botUsernameRatio": 0.6}}
+        candidates = [cand("f1"), cand("f2"), cand("f3"), cand("f4"),
+                      {"fingerprint": "f5", "nAuthors": 1, "newAccountRatio": 1.0,
+                       "signals": {"botUsernameRatio": 1.0}}]  # F1a 單帳號：不合格
+        rings = [
+            {"id": "r1", "fingerprint": "f1", "status": "pending"},
+            {"id": "r2", "fingerprint": "f2", "status": "dismissed"},  # 人工判過誤判 → 不碰
+            {"id": "r3", "fingerprint": "f3", "status": "restored"},   # 人工解凍過 → 不碰
+            {"id": "boom", "fingerprint": "f4", "status": "pending"},  # 失敗不擋整批
+        ]
+        s = auto_freeze("http://x", "t", candidates, rings,
+                        {"high_authors": 3, "new_ratio_hi": 0.8,
+                         "bot_ratio_hi": 0.5, "old_exempt_ratio": 0.34})
+    finally:
+        ring_detect_job._post_freeze = orig
+
+    assert calls == ["r1", "boom"]  # dismissed/restored/單帳號 全都沒被呼叫
+    assert [f["ring_id"] for f in s["frozen"]] == ["r1"]
+    assert {x["status"] for x in s["skipped_status"]} == {"dismissed", "restored"}
+    assert s["ineligible"] == 1 and len(s["errors"]) == 1
+
+
+def test_load_sql_substitutes_single_author_min_posts():
+    for ct in ("article", "moment"):
+        sql = _load_sql(CONTENT_TYPES[ct]["sql"], days=30, min_authors=3,
+                        new_account_days=30, single_author_min_posts=3)
+        assert ":single_author_min_posts" not in sql
+        assert ":min_authors" not in sql and ":days" not in sql
+        assert "n_authors = 1" in sql  # F1a 單帳號洗文條款存在
+
+
+def test_content_queries_carry_is_new_account_flag():
+    for spec in CONTENT_TYPES.values():
+        assert "is_new_account" in spec["content_query"]
+        assert "%(new_account_days)s" in spec["content_query"]
 
 
 if __name__ == "__main__":

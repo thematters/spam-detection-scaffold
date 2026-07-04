@@ -62,6 +62,8 @@ SELECT
   latest_post
 FROM rings
 WHERE n_authors >= :min_authors            -- 同模板跨 ≥K 個不同帳號 = ring 訊號
+   -- F1a（SPEC_RING_V2）：單帳號洗文——同一帳號同模板 ≥N 篇也成候選（送控制台，永不自動凍結）
+   OR (n_authors = 1 AND n_moments >= :single_author_min_posts)
 ORDER BY n_authors DESC, n_moments DESC;
 
 -- 注意：本查詢只「找候選 ring」，不做任何處置（體檢階段）。處置分級（排除 discovery + 標記帳號 spam
