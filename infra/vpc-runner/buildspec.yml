@@ -82,6 +82,14 @@ phases:
               SINGLE_AUTHOR_MIN_POSTS="${SINGLE_AUTHOR_MIN_POSTS:-3}" \
               python scripts/ring_detect_job.py
             ;;
+          ring-incremental)
+            # 軸一 D 增量版（SPEC_RING_V2）：S3 滾動指紋狀態，只掃水位線後新貼文，
+            # 掃描量 ∝ 發文速率。高頻排程用；全量 ring/moment-ring 每日一次當對帳。
+            python scripts/ring_incremental_job.py
+            ;;
+          moment-ring-incremental)
+            CONTENT_TYPE=moment python scripts/ring_incremental_job.py
+            ;;
           moment-heldout)
             # 撈動態乾淨 held-out（老帳號 ham + 受限作者 spam）寫 S3，給本地打短內容模型量誤殺/召回。
             # 動態短內容 → min-text-len 預設較低（10）；無 article id 截點，用帳號年齡分層。
