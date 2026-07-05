@@ -224,21 +224,38 @@ def _merge_by_fingerprint(cands: list) -> list:
             "sampleBrands": sorted({x for s in sigs for x in (s.get("sampleBrands") or [])})[:10],
             "contentModelMax": None,
         }
-        ratios = [c["newAccountRatio"] for c in group if c.get("newAccountRatio") is not None]
+        # 加權平均而非 max（審查 F2）：取 max 會讓「老帳號群＋新帳號群」合併後
+        # 整包看起來全新、拖進雙鑰自動凍結；權重＝各群跨帳號數。
+        weighted = [(c["newAccountRatio"], int(c.get("nAuthors") or 0))
+                    for c in group if c.get("newAccountRatio") is not None]
+        w_total = sum(w for _, w in weighted)
+        ratio = (sum(r * w for r, w in weighted) / w_total) if w_total else None
         n_posts = sum(int(c.get("nArticles") or 0) for c in group)
         ring_size = max(merged_sig["nearDupRingSize"], merged_sig["entityRingSize"])
         score = round(ring_size + len(member_ids) * merged_sig["botUsernameRatio"], 4)
-        out.append({
+        merged = {
             "fingerprint": fp,
             "memberUserIds": member_ids,
             "signals": merged_sig,
             "nArticles": n_posts,
             "nAuthors": len(member_ids),
-            "newAccountRatio": max(ratios) if ratios else None,
+            "newAccountRatio": round(ratio, 4) if ratio is not None else None,
             "score": score,
             "severity": _severity_of(score),
-        })
+        }
+        # 內部欄位（"_" 前綴，upsert 前剝除）：驗證成員取聯集、截斷取 OR
+        verified = sorted({m for c in group for m in (c.get("_verifiedMemberIds") or [])})
+        if verified:
+            merged["_verifiedMemberIds"] = verified
+        if any(c.get("_truncated") for c in group):
+            merged["_truncated"] = True
+        out.append(merged)
     return out
+
+
+def strip_internal_keys(cands: list) -> list:
+    """upsert payload 只留 GraphQL input 欄位；"_" 前綴為 job 內部決策用。"""
+    return [{k: v for k, v in c.items() if not k.startswith("_")} for c in cands]
 
 
 def filter_empty_members(row: dict, items: list, count_col: str) -> tuple[dict, list]:
@@ -370,6 +387,11 @@ def detect(conn, *, content_type: str, days: int, min_authors: int,
             # 內容正規化後為空（純圖/emoji/url/空白貼文）→ 無文字模板可比對，
             # 不成 ring（否則會把不相干的帳號全擠成一個假群，如 d41d8cd9）。
             continue
+        # 審查 F1：自動凍結只能碰「本輪實際抓到貼文、通過純圖過濾」的成員；
+        # 截斷 ring（貼文數超過抓取上限）含未驗證成員 → 降級人工。
+        cand["_verifiedMemberIds"] = sorted({str(it["author_id"]) for it in items})
+        if len(row.get(spec["id_col"]) or []) > max_articles:
+            cand["_truncated"] = True
         rings.append(cand)
     return _merge_by_fingerprint(rings)
 
@@ -401,13 +423,19 @@ def _post_upsert(endpoint: str, token: str, candidates: list, *,
     return body["data"]["upsertSpamRingCandidates"]
 
 
-def _post_freeze(endpoint: str, token: str, ring_id: str, remark: str) -> dict:
+def _post_freeze(endpoint: str, token: str, ring_id: str, remark: str,
+                 member_user_ids: list | None = None) -> dict:
     import requests
 
+    freeze_input: dict = {"id": ring_id, "remark": remark}
+    if member_user_ids:
+        # 審查 F1：交集凍結——server 端成員表是歷次 upsert 聯集（只增不減），
+        # 自動化只准碰本輪驗證過的成員；名單外（歷史誤列/未驗證）留給人工。
+        freeze_input["memberUserIds"] = member_user_ids
     resp = requests.post(
         endpoint,
         json={"query": FREEZE_MUTATION,
-              "variables": {"input": {"id": ring_id, "remark": remark}}},
+              "variables": {"input": freeze_input}},
         headers=_gql_headers(token),
         timeout=120,
     )
@@ -425,10 +453,21 @@ def auto_freeze(endpoint: str, token: str, candidates: list, rings: list, cfg: d
     結果彙總給日報/稽核。
     """
     by_fp = {r["fingerprint"]: r for r in rings if r.get("fingerprint")}
-    summary = {"frozen": [], "skipped_status": [], "ineligible": 0, "errors": []}
+    summary = {"frozen": [], "skipped_status": [], "skipped_unverified": [],
+               "ineligible": 0, "errors": []}
     for cand in candidates:
         if not auto_freeze_eligible(cand, **cfg):
             summary["ineligible"] += 1
+            continue
+        # 審查 F1：截斷 ring 含未驗證成員 → 降級人工；驗證成員數自身也要過鑰1
+        # 門檻（否則「大 ring 但只驗證到 2 人」會以小樣本凍結）。
+        verified = cand.get("_verifiedMemberIds") or []
+        if cand.get("_truncated") or len(verified) < cfg.get("high_authors", 3):
+            summary["skipped_unverified"].append({
+                "fingerprint": cand["fingerprint"],
+                "truncated": bool(cand.get("_truncated")),
+                "n_verified": len(verified),
+            })
             continue
         ring = by_fp.get(cand["fingerprint"])
         if not ring:
@@ -439,9 +478,11 @@ def auto_freeze(endpoint: str, token: str, candidates: list, rings: list, cfg: d
             continue
         remark = (f"auto-freeze v2 雙鑰：跨{cand['nAuthors']}帳號 "
                   f"新{(cand.get('newAccountRatio') or 0):.0%} "
-                  f"亂碼{(cand['signals'].get('botUsernameRatio') or 0):.0%}")
+                  f"亂碼{(cand['signals'].get('botUsernameRatio') or 0):.0%}"
+                  f"；驗證成員 {len(verified)}")
         try:
-            result = _post_freeze(endpoint, token, ring["id"], remark)
+            result = _post_freeze(endpoint, token, ring["id"], remark,
+                                  member_user_ids=verified)
             summary["frozen"].append({
                 "fingerprint": cand["fingerprint"],
                 "ring_id": ring["id"],
@@ -507,7 +548,8 @@ def main() -> int:
               file=sys.stderr)
         print(json.dumps(candidates, ensure_ascii=False)[:2000])
         return 0
-    result = _post_upsert(endpoint, token, candidates, with_rings=auto_freeze_on)
+    result = _post_upsert(endpoint, token, strip_internal_keys(candidates),
+                          with_rings=auto_freeze_on)
     print(f"upserted: {json.dumps({k: v for k, v in result.items() if k != 'rings'})}")
 
     if auto_freeze_on:
