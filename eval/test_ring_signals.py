@@ -48,6 +48,29 @@ def test_telegram_not_allowlisted():
     assert "t.me" not in MAINSTREAM_DOMAINS
 
 
+def test_tg_requires_channel_boundary():
+    assert "contact:successor" not in advertised_entities("the fighting successor story")
+    assert "contact:successor" not in advertised_entities("TG successor of a political family")
+    assert "contact:k59421" in advertised_entities("TG：@k59421")
+
+
+def test_qq_customer_service_contact():
+    assert "contact:93018069" in advertised_entities("新世界娱乐客服联系客服QQ：93018069")
+
+
+def test_qq_bracket_contact():
+    assert "contact:4893021" in advertised_entities("缅甸圣淘沙国际娱乐赌场线上开户客服联系客服【QQ 4893021】")
+
+
+def test_micro_q_contact_before_marker():
+    text = "加Q微咨询办理【Iowa电子版学位证书）1825214279微Q造假美国爱荷华大学毕业证"
+    assert "contact:1825214279" in advertised_entities(text)
+
+
+def test_line_contact_recovery_scam():
+    assert "contact:c88863" in advertised_entities("反詐騙援助【賴 c88863】TikTok是詐騙嗎？")
+
+
 # --- template_family 遮數字讓同模板歸群 ---
 def test_template_family_masks_digits():
     assert template_family("邀请码 BIN6666 注册") == template_family("邀请码 BIN8888 注册")

@@ -75,8 +75,24 @@ EMPTY_FINGERPRINT = normalized_fingerprint("")
 
 # --- 廣告實體（跨帳號不變量）---
 _domain = re.compile(r"\b([a-z0-9-]+\.(?:com|net|cc|tv|xyz|top|vip|me|io|app|live|info))\b", re.I)
-_contact = re.compile(
-    r"(?:line|telegram|tg|whatsapp|wechat|微信|賴|skype)[\s:：@]*([a-z0-9_\-\.]{3,})", re.I)
+_latin_chat_contact = re.compile(
+    r"\b(?:line|telegram|tg|whatsapp|wechat|skype)\b\s*[:：@]\s*[@＠]?\s*([a-z0-9_\-.]{3,})",
+    re.I,
+)
+_cjk_chat_contact = re.compile(
+    r"(?:微信|賴)[\s:：@]*([a-z0-9_\-.]{3,})",
+    re.I,
+)
+_qq_contact_after = re.compile(
+    r"(?:客服\s*)?(?:qq|q\s*q|微q|q微|qq[号號]?|q[号號]|加q微|微q(?:咨询|咨詢|造假)?|"
+    r"联系\s*(?:客服\s*)?qq|聯繫\s*(?:客服\s*)?qq)[\s:：@【】\[\]（）()]*"
+    r"([a-z0-9][a-z0-9_\-.]{2,})",
+    re.I,
+)
+_qq_contact_before = re.compile(
+    r"(?<![a-z0-9])([a-z0-9][a-z0-9_\-.]{4,})\s*(?:微q|q微|qq[号號]?|q[号號])",
+    re.I,
+)
 # 邀請碼 token：crypto 返佣 ring 的真正不變量（實測 LIDANG×39 / BG998 / 3XCB / AHR99…），
 # 內容模型與純網域訊號都漏（網域是交易所官網或被輪換的反向連結，碼才是 ring 共用的那個東西）。
 _invite_code = re.compile(
@@ -103,7 +119,19 @@ def advertised_entities(text: str) -> set:
     t = _plain(text).lower()
     ents = {m.group(1).lower() for m in _domain.finditer(t)
             if m.group(1).lower() not in MAINSTREAM_DOMAINS}
-    ents |= {"contact:" + m.group(1).lower() for m in _contact.finditer(t)}
+    ents |= {
+        "contact:" + m.group(1).lower().strip("._-")
+        for rx in (_latin_chat_contact, _cjk_chat_contact)
+        for m in rx.finditer(t)
+    }
+    # QQ / 微Q spam often writes the contact as `客服QQ: 93018069`, `QQ 4893021`,
+    # or with the number before the marker, e.g. `1825214279微Q造假`.
+    qq_tokens = {
+        m.group(1).lower().strip("._-")
+        for rx in (_qq_contact_after, _qq_contact_before)
+        for m in rx.finditer(t)
+    }
+    ents |= {"contact:" + token for token in qq_tokens if any(c.isdigit() for c in token)}
     ents |= {"invite:" + m.group(1).upper() for m in _invite_code.finditer(t)}
     ents |= {"brand:" + m.group(1).lower().replace(".", "") for m in _brand.finditer(t)}
     return ents

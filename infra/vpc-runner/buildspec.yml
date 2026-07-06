@@ -1,5 +1,6 @@
 # CodeBuild buildspec — VPC 內執行入口，跑「需要連 read-replica」的批次工作。
-# 用環境變數 JOB 選工作：ring | acceptance | l1
+# 用環境變數 JOB 選工作：ring | moment-ring | ring-incremental | moment-ring-incremental |
+# acceptance | l1 | ring-watchlist
 # 觸發：aws codebuild start-build --project-name spam-vpc-runner \
 #         --environment-variables-override name=JOB,value=ring
 version: 0.2
@@ -89,6 +90,15 @@ phases:
             ;;
           moment-ring-incremental)
             CONTENT_TYPE=moment python scripts/ring_incremental_job.py
+            ;;
+          ring-watchlist)
+            # Read-only sanity check for known recurring spam-ring families.
+            # This does not upsert candidates or freeze accounts; it helps
+            # distinguish detector signal health from EventBridge/CodeBuild
+            # scheduling problems when the Telegram digest looks stale.
+            python scripts/check_ring_watchlist.py --json --first "${RING_WATCHLIST_FIRST:-30}" \
+              > /tmp/ring_watchlist.json
+            aws s3 cp /tmp/ring_watchlist.json "s3://${BUCKET}/ring-watchlist/$(date +%Y-%m-%d)/result.json"
             ;;
           moment-heldout)
             # 撈動態乾淨 held-out（老帳號 ham + 受限作者 spam）寫 S3，給本地打短內容模型量誤殺/召回。
