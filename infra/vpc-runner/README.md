@@ -48,6 +48,10 @@ aws ec2 revoke-security-group-ingress --region ap-southeast-1 \
 aws codebuild start-build --region ap-southeast-1 --project-name spam-vpc-runner \
   --environment-variables-override name=JOB,value=ring
 
+# 軸一 D：watchlist read-only sanity check（不寫候選、不凍結）
+aws codebuild start-build --region ap-southeast-1 --project-name spam-vpc-runner \
+  --environment-variables-override name=JOB,value=ring-watchlist
+
 # 軸一 B：conformal 定論驗收
 aws codebuild start-build --region ap-southeast-1 --project-name spam-vpc-runner \
   --environment-variables-override name=JOB,value=acceptance
