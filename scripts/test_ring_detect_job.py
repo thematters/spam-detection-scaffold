@@ -169,6 +169,73 @@ def test_merge_by_fingerprint_unions_members_and_signals():
     assert merged["newAccountRatio"] == 0.7
 
 
+def test_merge_by_fingerprint_merges_shared_invite_code_across_templates():
+    def cand(fp, ids, code, text):
+        return {
+            "fingerprint": fp,
+            "memberUserIds": ids,
+            "signals": {
+                "nearDupRingSize": len(ids),
+                "entityRingSize": len(ids),
+                "topEntity": f"invite:{code}",
+                "botUsernameRatio": 0.5,
+                "sampleCodes": [code],
+                "sampleBrands": [],
+                "sampleTexts": [text],
+            },
+            "nArticles": len(ids),
+            "nAuthors": len(ids),
+            "newAccountRatio": 1.0,
+            "score": 1,
+            "severity": "low",
+        }
+
+    out = _merge_by_fingerprint([
+        cand("fp-template-a", ["1", "2", "3"], "LIDANG", "币安邀请码 LIDANG"),
+        cand("fp-template-b", ["4", "5"], "LIDANG", "binance 返佣码 LIDANG"),
+    ])
+
+    assert len(out) == 1
+    merged = out[0]
+    assert merged["fingerprint"].startswith("entity-")
+    assert merged["memberUserIds"] == ["1", "2", "3", "4", "5"]
+    assert merged["nAuthors"] == 5 and merged["nArticles"] == 5
+    assert merged["signals"]["sampleCodes"] == ["LIDANG"]
+    assert merged["signals"]["sampleTexts"] == [
+        "币安邀请码 LIDANG",
+        "binance 返佣码 LIDANG",
+    ]
+
+
+def test_merge_by_fingerprint_does_not_merge_brand_only_groups():
+    def cand(fp, ids):
+        return {
+            "fingerprint": fp,
+            "memberUserIds": ids,
+            "signals": {
+                "nearDupRingSize": len(ids),
+                "entityRingSize": len(ids),
+                "topEntity": "brand:28bet",
+                "botUsernameRatio": 0.5,
+                "sampleCodes": [],
+                "sampleBrands": ["28bet"],
+                "sampleTexts": [],
+            },
+            "nArticles": len(ids),
+            "nAuthors": len(ids),
+            "newAccountRatio": 1.0,
+            "score": 1,
+            "severity": "low",
+        }
+
+    out = _merge_by_fingerprint([
+        cand("fp-template-a", ["1", "2", "3"]),
+        cand("fp-template-b", ["4", "5"]),
+    ])
+
+    assert len(out) == 2
+
+
 def test_empty_content_maps_to_empty_fingerprint_and_is_skippable():
     # md5("") 前 8 碼；純圖/emoji/url/空白/HTML-only 都正規化成空 → 同一個空指紋
     assert ring_signals.EMPTY_FINGERPRINT == "d41d8cd9"
