@@ -48,6 +48,15 @@ def test_assemble_signals_includes_readable_sample_texts():
     assert all("http" not in sample and "<" not in sample for sample in sig["sampleTexts"])
 
 
+def test_top_entity_tie_is_deterministic_and_prefers_contact():
+    items = [
+        {"content": "gmail.com Telegram: same_handle", "author": "a"},
+        {"content": "gmail.com Telegram: same_handle", "author": "b"},
+    ]
+    observed = {ring_signals.top_entity_ring(items)[0] for _ in range(20)}
+    assert observed == {"contact:same_handle"}
+
+
 def test_build_candidate_maps_row_and_member_ids():
     row = {
         "template_fam": "abc12345",

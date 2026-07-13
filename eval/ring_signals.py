@@ -141,11 +141,25 @@ def top_entity_ring(items: list):
     """回傳 (entity, 跨帳號數)：共用任一廣告實體的最大跨帳號群。items: [{'content','author'}]。"""
     ent_authors = collections.defaultdict(set)
     for a in items:
-        for e in advertised_entities(a["content"]):
+        for e in sorted(advertised_entities(a["content"])):
             ent_authors[e].add(a["author"])
     if not ent_authors:
         return (None, 0)
-    e, au = max(ent_authors.items(), key=lambda kv: len(kv[1]))
+    # 同票時必須穩定選擇，否則 set 的 hash 隨機順序會讓每次 run 的 topEntity、
+    # 跨模板合併與最終 fingerprint 漂移。聯絡資訊與邀請碼比共用網域更具識別力。
+    def priority(entity: str) -> int:
+        if entity.startswith("invite:"):
+            return 3
+        if entity.startswith("contact:"):
+            return 2
+        if entity.startswith("brand:"):
+            return 0
+        return 1
+
+    e, au = sorted(
+        ent_authors.items(),
+        key=lambda kv: (-len(kv[1]), -priority(kv[0]), kv[0]),
+    )[0]
     return (e, len(au))
 
 
