@@ -404,7 +404,8 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
         candidates = [cand("f1"), cand("f2"), cand("f3"), cand("f4"),
                       cand("f5", nAuthors=1, _verifiedMemberIds=["9"]),  # F1a 單帳號：不合格
                       cand("f6", _truncated=True),                # 截斷 → 降級人工
-                      cand("f7", _verifiedMemberIds=["21", "22"])]  # 驗證成員 <3 → 降級人工
+                      cand("f7", _verifiedMemberIds=["21", "22"]),
+                      cand("f8")]  # 已凍結 ring 新增成員仍需送 server refresh
         rings = [
             {"id": "r1", "fingerprint": "f1", "status": "pending"},
             {"id": "r2", "fingerprint": "f2", "status": "dismissed"},  # 人工判過誤判 → 不碰
@@ -412,6 +413,7 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
             {"id": "boom", "fingerprint": "f4", "status": "pending"},  # 失敗不擋整批
             {"id": "r6", "fingerprint": "f6", "status": "pending"},
             {"id": "r7", "fingerprint": "f7", "status": "pending"},
+            {"id": "r8", "fingerprint": "f8", "status": "frozen"},
         ]
         s = auto_freeze("http://x", "t", candidates, rings,
                         {"high_authors": 3, "new_ratio_hi": 0.8,
@@ -419,14 +421,15 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
     finally:
         ring_detect_job._post_freeze = orig
 
-    assert calls == ["r1", "boom"]  # dismissed/restored/單帳號/截斷/低驗證 全都沒被呼叫
-    assert [f["ring_id"] for f in s["frozen"]] == ["r1"]
+    assert calls == ["r1", "boom", "r8"]  # frozen 可 refresh，其餘否決條件不呼叫
+    assert [f["ring_id"] for f in s["frozen"]] == ["r1", "r8"]
     assert {x["status"] for x in s["skipped_status"]} == {"dismissed", "restored"}
     assert s["ineligible"] == 1 and len(s["errors"]) == 1
     # 審查 F1：截斷與驗證不足各自降級、凍結呼叫帶交集名單
     assert {x["fingerprint"] for x in s["skipped_unverified"]} == {"f6", "f7"}
     assert freeze_member_args == {"r1": ["11", "12", "13", "14", "15"],
-                                  "boom": ["11", "12", "13", "14", "15"]}
+                                  "boom": ["11", "12", "13", "14", "15"],
+                                  "r8": ["11", "12", "13", "14", "15"]}
 
 
 def test_strip_internal_keys_removes_underscore_fields():

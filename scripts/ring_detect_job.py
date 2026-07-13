@@ -648,9 +648,9 @@ def _post_freeze(endpoint: str, token: str, ring_id: str, remark: str,
 def auto_freeze(endpoint: str, token: str, candidates: list, rings: list, cfg: dict) -> dict:
     """對「決策合格 × server 回報仍 pending」的 ring 執行凍結。
 
-    只碰 status=pending：dismissed（人工判過誤判）與 restored（人工解凍過）是明確的
-    人類否決訊號，自動化永不推翻。逐 ring try/except——單一失敗不擋其他 ring，
-    結果彙總給日報/稽核。
+    只碰 status=pending/frozen：frozen ring 可能被另一內容層追加本輪驗證過的新 pending
+    成員，由 server 只處理該增量。dismissed（人工判過誤判）與 restored（人工解凍過）
+    是明確的人類否決訊號，自動化永不推翻。逐 ring try/except，單一失敗不擋其他 ring。
     """
     by_fp = {r["fingerprint"]: r for r in rings if r.get("fingerprint")}
     summary = {"frozen": [], "skipped_status": [], "skipped_unverified": [],
@@ -672,7 +672,7 @@ def auto_freeze(endpoint: str, token: str, candidates: list, rings: list, cfg: d
         ring = by_fp.get(cand["fingerprint"])
         if not ring:
             continue
-        if ring.get("status") != "pending":
+        if ring.get("status") not in {"pending", "frozen"}:
             summary["skipped_status"].append(
                 {"fingerprint": cand["fingerprint"], "status": ring.get("status")})
             continue
