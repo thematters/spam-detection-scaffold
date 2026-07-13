@@ -237,6 +237,31 @@ def test_merge_by_fingerprint_does_not_merge_brand_only_groups():
     assert len(out) == 2
 
 
+def test_merge_by_fingerprint_does_not_merge_shared_service_domains():
+    def cand(fp, uid):
+        return {
+            "fingerprint": fp,
+            "memberUserIds": [uid],
+            "signals": {
+                "nearDupRingSize": 1,
+                "entityRingSize": 1,
+                "topEntity": "gmail.com",
+                "botUsernameRatio": 0.0,
+                "sampleCodes": [],
+                "sampleBrands": [],
+                "sampleTexts": [],
+            },
+            "nArticles": 1,
+            "nAuthors": 1,
+            "newAccountRatio": 1.0,
+            "score": 1,
+            "severity": "low",
+        }
+
+    out = _merge_by_fingerprint([cand("template-a", "1"), cand("template-b", "2")])
+    assert len(out) == 2
+
+
 def test_empty_content_maps_to_empty_fingerprint_and_is_skippable():
     # md5("") 前 8 碼；純圖/emoji/url/空白/HTML-only 都正規化成空 → 同一個空指紋
     assert ring_signals.EMPTY_FINGERPRINT == "d41d8cd9"

@@ -50,6 +50,20 @@ SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
 TAG_RE = re.compile(r"<[^>]+>")
 URL_RE = re.compile(r"https?://\S+")
 WS_RE = re.compile(r"\s+")
+SHARED_ENTITY_DOMAINS = {
+    "gmail.com",
+    "googlemail.com",
+    "hotmail.com",
+    "outlook.com",
+    "yahoo.com",
+    "icloud.com",
+    "proton.me",
+    "protonmail.com",
+    "qq.com",
+    "t.me",
+    "telegram.me",
+    "whatsapp.com",
+}
 
 # 內容型別設定：粗篩 SQL、ring 成員貼文 id 欄、貼文數欄、抓內容的查詢（精修用）。
 # 兩者 content 查詢都回 author_id / author_name / content / is_new_account，
@@ -310,7 +324,11 @@ def strong_entity_keys(signals: dict) -> set:
     if isinstance(top, str):
         if top.startswith("invite:") or top.startswith("contact:"):
             keys.add(top.lower())
-        elif "." in top and not top.startswith("brand:"):
+        elif (
+            "." in top
+            and not top.startswith("brand:")
+            and top.lower() not in SHARED_ENTITY_DOMAINS
+        ):
             keys.add(f"domain:{top.lower()}")
     for code in signals.get("sampleCodes") or []:
         keys.add(f"invite:{str(code).lower()}")
