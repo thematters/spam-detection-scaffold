@@ -11,6 +11,7 @@ from ring_detect_job import (  # noqa: E402
     assemble_signals,
     auto_freeze,
     auto_freeze_eligible,
+    build_shadow_report,
     build_candidate,
     filter_empty_members,
     _severity_of,
@@ -45,6 +46,15 @@ def test_assemble_signals_includes_readable_sample_texts():
         "加拿大翻譯社 免費諮詢 line",
     ]
     assert all("http" not in sample and "<" not in sample for sample in sig["sampleTexts"])
+
+
+def test_top_entity_tie_is_deterministic_and_prefers_contact():
+    items = [
+        {"content": "gmail.com Telegram: same_handle", "author": "a"},
+        {"content": "gmail.com Telegram: same_handle", "author": "b"},
+    ]
+    observed = {ring_signals.top_entity_ring(items)[0] for _ in range(20)}
+    assert observed == {"contact:same_handle"}
 
 
 def test_build_candidate_maps_row_and_member_ids():
@@ -236,6 +246,31 @@ def test_merge_by_fingerprint_does_not_merge_brand_only_groups():
     assert len(out) == 2
 
 
+def test_merge_by_fingerprint_does_not_merge_shared_service_domains():
+    def cand(fp, uid):
+        return {
+            "fingerprint": fp,
+            "memberUserIds": [uid],
+            "signals": {
+                "nearDupRingSize": 1,
+                "entityRingSize": 1,
+                "topEntity": "gmail.com",
+                "botUsernameRatio": 0.0,
+                "sampleCodes": [],
+                "sampleBrands": [],
+                "sampleTexts": [],
+            },
+            "nArticles": 1,
+            "nAuthors": 1,
+            "newAccountRatio": 1.0,
+            "score": 1,
+            "severity": "low",
+        }
+
+    out = _merge_by_fingerprint([cand("template-a", "1"), cand("template-b", "2")])
+    assert len(out) == 2
+
+
 def test_empty_content_maps_to_empty_fingerprint_and_is_skippable():
     # md5("") 前 8 碼；純圖/emoji/url/空白/HTML-only 都正規化成空 → 同一個空指紋
     assert ring_signals.EMPTY_FINGERPRINT == "d41d8cd9"
@@ -303,8 +338,8 @@ def test_auto_freeze_eligible_double_key():
                 "signals": {"botUsernameRatio": bot}}
     # 雙鑰成立：跨 3 帳號（F1b 門檻）＋新帳號比高
     assert auto_freeze_eligible(cand(3, 0.9, 0.0))
-    # 雙鑰成立：亂碼比高
-    assert auto_freeze_eligible(cand(5, 0.5, 0.6))
+    # 亂碼帳號名只供人工參考，不得單獨取得凍結資格
+    assert not auto_freeze_eligible(cand(5, 0.5, 1.0))
     # 鑰1 不足（單帳號 F1a 候選天然不合格）
     assert not auto_freeze_eligible(cand(1, 1.0, 1.0))
     assert not auto_freeze_eligible(cand(2, 1.0, 1.0))
@@ -314,6 +349,44 @@ def test_auto_freeze_eligible_double_key():
     assert not auto_freeze_eligible(cand(10, 0.5, 0.1))
     # 資料缺席即否決
     assert not auto_freeze_eligible(cand(10, None, 0.9))
+
+
+def test_article_fingerprint_uses_body_not_title():
+    row = {"template_fam": "coarse", "n_articles": 3, "n_authors": 3,
+           "new_account_ratio": 1.0, "author_ids": [1, 2, 3]}
+    items_a = [{"content": "標題甲 相同正文", "fingerprint_content": "相同正文",
+                "author": "a"}]
+    items_b = [{"content": "完全不同標題 相同正文", "fingerprint_content": "相同正文",
+                "author": "b"}]
+    assert build_candidate(row, items_a)["fingerprint"] == build_candidate(
+        row, items_b
+    )["fingerprint"]
+
+
+def test_shadow_report_uses_verified_member_intersection_and_full_gates():
+    cfg = {"high_authors": 3, "new_ratio_hi": 0.8,
+           "bot_ratio_hi": 0.5, "old_exempt_ratio": 0.34}
+    candidate = {
+        "fingerprint": "fp",
+        "memberUserIds": ["1", "2", "3"],
+        "_verifiedMemberIds": ["2", "3", "outside"],
+        "_verifiedMembers": [
+            {"id": "2", "userName": "u2"},
+            {"id": "3", "userName": "u3"},
+            {"id": "outside", "userName": "not-a-member"},
+        ],
+        "nArticles": 3,
+        "nAuthors": 3,
+        "newAccountRatio": 1.0,
+        "signals": {"botUsernameRatio": 1.0, "nearDupRingSize": 3,
+                    "entityRingSize": 0, "sampleTexts": ["same"]},
+    }
+    report = build_shadow_report([candidate], content_type="article", cfg=cfg)
+    decision = report["decisions"][0]
+    assert report["mode"] == "SHADOW_V2_POST_REFINEMENT_READ_ONLY"
+    assert decision["action"] == "REVIEW_UNVERIFIED"
+    assert [m["id"] for m in decision["verifiedMembers"]] == ["2", "3"]
+    assert report["summary"]["autoFreezeEligibleAccounts"] == 0
 
 
 def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
@@ -333,13 +406,15 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
         def cand(fp, **over):
             base = {"fingerprint": fp, "nAuthors": 5, "newAccountRatio": 1.0,
                     "signals": {"botUsernameRatio": 0.6},
+                    "memberUserIds": ["11", "12", "13", "14", "15"],
                     "_verifiedMemberIds": ["11", "12", "13", "14", "15"]}
             base.update(over)
             return base
         candidates = [cand("f1"), cand("f2"), cand("f3"), cand("f4"),
                       cand("f5", nAuthors=1, _verifiedMemberIds=["9"]),  # F1a 單帳號：不合格
                       cand("f6", _truncated=True),                # 截斷 → 降級人工
-                      cand("f7", _verifiedMemberIds=["21", "22"])]  # 驗證成員 <3 → 降級人工
+                      cand("f7", _verifiedMemberIds=["21", "22"]),
+                      cand("f8")]  # 已凍結 ring 新增成員仍需送 server refresh
         rings = [
             {"id": "r1", "fingerprint": "f1", "status": "pending"},
             {"id": "r2", "fingerprint": "f2", "status": "dismissed"},  # 人工判過誤判 → 不碰
@@ -347,6 +422,7 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
             {"id": "boom", "fingerprint": "f4", "status": "pending"},  # 失敗不擋整批
             {"id": "r6", "fingerprint": "f6", "status": "pending"},
             {"id": "r7", "fingerprint": "f7", "status": "pending"},
+            {"id": "r8", "fingerprint": "f8", "status": "frozen"},
         ]
         s = auto_freeze("http://x", "t", candidates, rings,
                         {"high_authors": 3, "new_ratio_hi": 0.8,
@@ -354,14 +430,15 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
     finally:
         ring_detect_job._post_freeze = orig
 
-    assert calls == ["r1", "boom"]  # dismissed/restored/單帳號/截斷/低驗證 全都沒被呼叫
-    assert [f["ring_id"] for f in s["frozen"]] == ["r1"]
+    assert calls == ["r1", "boom", "r8"]  # frozen 可 refresh，其餘否決條件不呼叫
+    assert [f["ring_id"] for f in s["frozen"]] == ["r1", "r8"]
     assert {x["status"] for x in s["skipped_status"]} == {"dismissed", "restored"}
     assert s["ineligible"] == 1 and len(s["errors"]) == 1
     # 審查 F1：截斷與驗證不足各自降級、凍結呼叫帶交集名單
     assert {x["fingerprint"] for x in s["skipped_unverified"]} == {"f6", "f7"}
     assert freeze_member_args == {"r1": ["11", "12", "13", "14", "15"],
-                                  "boom": ["11", "12", "13", "14", "15"]}
+                                  "boom": ["11", "12", "13", "14", "15"],
+                                  "r8": ["11", "12", "13", "14", "15"]}
 
 
 def test_strip_internal_keys_removes_underscore_fields():
@@ -408,7 +485,15 @@ def test_load_sql_substitutes_single_author_min_posts():
 def test_content_queries_carry_is_new_account_flag():
     for spec in CONTENT_TYPES.values():
         assert "is_new_account" in spec["content_query"]
+        assert "fingerprint_content" in spec["content_query"]
         assert "%(new_account_days)s" in spec["content_query"]
+
+
+def test_article_sql_groups_by_body_without_title():
+    sql = CONTENT_TYPES["article"]["sql"].read_text()
+    fingerprint_expr = sql.split("AS template_fam", 1)[0]
+    assert "coalesce(ac.content,'')" in fingerprint_expr
+    assert "av.title" not in fingerprint_expr
 
 
 if __name__ == "__main__":

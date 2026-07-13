@@ -5,16 +5,15 @@
       （欄位：template_fam, n_articles|n_moments, n_authors, new_account_ratio,
        sample_authors, [author_ids], earliest_account, latest_post）。
 
-對每個候選 ring，依「雙鑰 + 老帳號豁免」分三級（SPAM_ROADMAP 軸一 D 安全護欄）：
+對每個候選 ring，依「跨帳號 + 高新帳號比例」分三級（SPAM_ROADMAP 軸一 D 安全護欄）：
   FREEZE  （高信度，影子模式下＝「會凍結」但不執行）：
           ≥2 把獨立鑰匙成立——
             鑰1 跨帳號重複夠廣（n_authors ≥ HIGH_AUTHORS）
-            鑰2 至少一個獨立佐證：新帳號比例高（≥NEW_RATIO_HI）或 帳號名亂碼比例高（≥BOT_RATIO_HI）
-  REVIEW  （送人工佇列）：是 ring（n_authors ≥ MIN_AUTHORS）但未達 FREEZE，或落入老帳號豁免。
+            鑰2 新帳號比例高（≥NEW_RATIO_HI）
+  REVIEW  （送人工佇列）：是 ring（n_authors ≥ MIN_AUTHORS）但未達 FREEZE。
   SKIP    ：未達 ring 門檻。
 
-**老帳號豁免（硬性）**：新帳號比例 < OLD_EXEMPT_RATIO 且 亂碼比例 < BOT_RATIO_HI 的 ring
-（多為長期經營的老帳號，如機械 SEO），**永不自動凍結**，一律 REVIEW——怕誤傷真實老用戶。
+帳號名亂碼比例只保留在報告中供人工參考，不再單獨取得 FREEZE 資格。
 
 ⚠️ 影子模式：本腳本不呼叫任何 mutation、不碰帳號。輸出一份「若上線會如何處置」的稽核報告，
    給人工覆核一週、確認不誤傷後，才由處置端（海巡 bot 框架）接真正動作。
@@ -74,25 +73,15 @@ def decide(row: dict, cfg) -> dict:
     # 鑰匙
     key_spread = n_authors >= cfg.high_authors          # 跨帳號重複夠廣
     key_new = new_ratio >= cfg.new_ratio_hi             # 新帳號比例高
-    key_bot = bot_ratio >= cfg.bot_ratio_hi             # 帳號名亂碼比例高
-    keys = sum([key_spread, key_new, key_bot])
-
-    # 老帳號豁免（硬性）：幾乎都是老帳號且帳號名正常 → 永不自動，送人工
-    old_exempt = (new_ratio < cfg.old_exempt_ratio) and (bot_ratio < cfg.bot_ratio_hi)
+    key_bot = bot_ratio >= cfg.bot_ratio_hi             # 僅作人工佐證，不提供凍結資格
 
     if n_authors < cfg.min_authors:
         action, why = "SKIP", "未達 ring 門檻"
-    elif old_exempt:
-        action, why = "REVIEW", f"老帳號豁免（新帳號比 {new_ratio:.0%}、亂碼比 {bot_ratio:.0%}）→ 人工"
-    elif key_spread and (key_new or key_bot):
-        sig = []
-        if key_new:
-            sig.append(f"新帳號 {new_ratio:.0%}")
-        if key_bot:
-            sig.append(f"亂碼帳號 {bot_ratio:.0%}")
-        action, why = "FREEZE", f"雙鑰成立：跨 {n_authors} 帳號 + {' / '.join(sig)}"
+    elif key_spread and key_new:
+        action, why = "FREEZE", f"雙鑰成立：跨 {n_authors} 帳號 + 新帳號 {new_ratio:.0%}"
     else:
-        action, why = "REVIEW", f"單鑰（跨 {n_authors} 帳號，佐證不足）→ 人工"
+        suffix = f"，亂碼帳號 {bot_ratio:.0%} 僅供參考" if key_bot else ""
+        action, why = "REVIEW", f"新帳號比例未達門檻{suffix} → 人工"
 
     return {"template_fam": row.get("template_fam"), "action": action, "reason": why,
             "n_authors": n_authors, "n_posts": n_posts,
@@ -129,7 +118,7 @@ def main(argv) -> int:
         review_accts |= set(d["author_ids"])
 
     print("=" * 64)
-    print("軸一 D 影子決策報告（SHADOW — 不執行任何處置）")
+    print("軸一 D 粗篩影子決策報告（LEGACY PREFILTER，不執行任何處置）")
     print("=" * 64)
     print(f"候選 ring：{len(rows)}")
     print(f"  FREEZE（會凍結，影子不執行）：{len(by['FREEZE'])} 個 ring"
@@ -147,7 +136,9 @@ def main(argv) -> int:
               f" | {d['reason']}")
 
     if cfg.out:
-        json.dump({"mode": "SHADOW", "candidates": len(rows),
+        json.dump({"mode": "SHADOW_LEGACY_PREFILTER",
+                   "warning": "不含純圖過濾、驗證成員交集與實體合併；不得作為上線依據",
+                   "candidates": len(rows),
                    "freeze_rings": len(by["FREEZE"]), "freeze_accounts": sorted(frozen_accts),
                    "review_rings": len(by["REVIEW"]), "review_accounts": sorted(review_accts),
                    "decisions": decisions}, open(cfg.out, "w"), ensure_ascii=False, indent=2)

@@ -38,10 +38,11 @@ import ring_signals  # noqa: E402
 from ring_detect_job import (  # noqa: E402
     CONTENT_TYPES,
     auto_freeze,
-    auto_freeze_eligible,
     build_candidate,
     filter_empty_members,
+    shadow_decision,
     strip_internal_keys,
+    write_shadow_report,
     _merge_by_fingerprint,
     _post_upsert,
 )
@@ -54,7 +55,8 @@ NEW_POSTS_QUERIES = {
     "article": """
 SELECT a.id, a.author_id, u.user_name AS author_name,
        u.created_at AS user_created_at, a.created_at,
-       coalesce(av.title,'') || ' ' || coalesce(ac.content,'') AS content
+       coalesce(av.title,'') || ' ' || coalesce(ac.content,'') AS content,
+       coalesce(ac.content,'') AS fingerprint_content
 FROM article a
 JOIN article_version_newest av ON av.article_id = a.id
 JOIN article_content ac        ON ac.id = av.content_id
@@ -65,7 +67,8 @@ ORDER BY a.created_at
     "moment": """
 SELECT m.id, m.author_id, u.user_name AS author_name,
        u.created_at AS user_created_at, m.created_at,
-       coalesce(m.content, '') AS content
+       coalesce(m.content, '') AS content,
+       coalesce(m.content, '') AS fingerprint_content
 FROM moment m
 JOIN "user" u ON u.id = m.author_id
 WHERE m.created_at > %(since)s AND m.state = 'active'
@@ -83,7 +86,9 @@ SELECT id, state FROM "user" WHERE id = ANY(%(ids)s)
 def to_state_row(post: dict) -> dict | None:
     """DB 列 → 狀態列。正規化後無文字（純圖/emoji/url）的貼文不進狀態——
     它們永遠不該構成 ring（F3a 的每貼文版，比全量版的成員級過濾更前置）。"""
-    fp = ring_signals.normalized_fingerprint(post.get("content") or "")
+    fp = ring_signals.normalized_fingerprint(
+        post.get("fingerprint_content", post.get("content")) or ""
+    )
     if fp == ring_signals.EMPTY_FINGERPRINT:
         return None
     return {
@@ -304,6 +309,7 @@ def main() -> int:
                 posts = cur.fetchall()
             items = [
                 {"content": p["content"] or "",
+                 "fingerprint_content": p.get("fingerprint_content") or "",
                  "author": p["author_name"] or str(p["author_id"]),
                  "author_id": p["author_id"],
                  "is_new_account": p.get("is_new_account")}
@@ -320,15 +326,30 @@ def main() -> int:
             # 審查 F1/F3：凍結只准碰「本輪從 DB 抓回內容驗證過」的成員——
             # state 檔宣稱的成員（可能被汙染或過期）不進凍結名單；截斷降級人工。
             cand["_verifiedMemberIds"] = sorted({str(it["author_id"]) for it in items})
+            cand["_verifiedMembers"] = sorted(
+                ({"id": str(it["author_id"]), "userName": it["author"]} for it in items),
+                key=lambda member: member["id"],
+            )
             if len(g["post_ids"]) > max_articles:
                 cand["_truncated"] = True
             candidates.append(cand)
     candidates = _merge_by_fingerprint(candidates)
     print(f"{len(candidates)} candidate(s) touched by new posts")
 
+    shadow_report_out = os.environ.get("SHADOW_REPORT_OUT")
+    if shadow_report_out:
+        write_shadow_report(
+            shadow_report_out,
+            candidates,
+            content_type=content_type,
+            cfg=freeze_cfg,
+        )
+
     if dry_run:
         for c in candidates:
-            c["autoFreezeEligibleDryRun"] = auto_freeze_eligible(c, **freeze_cfg)
+            c["autoFreezeEligibleDryRun"] = (
+                shadow_decision(c, freeze_cfg)["action"] == "AUTO_FREEZE_ELIGIBLE"
+            )
         print(json.dumps(candidates, ensure_ascii=False, indent=2)[:4000])
         return 0
 
