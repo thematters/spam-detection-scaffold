@@ -19,7 +19,7 @@ WITH recent_articles AS (
       regexp_replace(
         regexp_replace(
           regexp_replace(
-            regexp_replace(lower(coalesce(av.title,'') || ' ' || coalesce(ac.content,'')),
+            regexp_replace(lower(coalesce(ac.content,'')),
                            '<[^>]+>', ' ', 'g'),          -- strip html
             'https?://[^[:space:]]+', ' ', 'g'),          -- mask url
           '[@＠][[:alnum:]_]+', ' ', 'g'),                -- mask handle

@@ -1,6 +1,6 @@
 # CodeBuild buildspec — VPC 內執行入口，跑「需要連 read-replica」的批次工作。
-# 用環境變數 JOB 選工作：ring | moment-ring | ring-incremental | moment-ring-incremental |
-# acceptance | l1 | ring-watchlist
+# 用環境變數 JOB 選工作：ring | moment-ring | ring-shadow-v2 | moment-ring-shadow-v2 |
+# ring-incremental | moment-ring-incremental | acceptance | l1 | ring-watchlist
 # 觸發：aws codebuild start-build --project-name spam-vpc-runner \
 #         --environment-variables-override name=JOB,value=ring
 version: 0.2
@@ -43,7 +43,9 @@ phases:
             #    AUTO_FREEZE（SPEC_RING_V2 F3b）由 CodeBuild 環境變數控制，預設不設＝影子/人工一鍵。
             DAYS="${DAYS:-30}" MIN_AUTHORS="${MIN_AUTHORS:-3}" NEW_ACCOUNT_DAYS="${NEW_ACCOUNT_DAYS:-30}" \
               SINGLE_AUTHOR_MIN_POSTS="${SINGLE_AUTHOR_MIN_POSTS:-3}" \
+              SHADOW_REPORT_OUT=/tmp/article_ring_v2_shadow.json \
               python scripts/ring_detect_job.py
+            aws s3 cp /tmp/article_ring_v2_shadow.json "s3://${BUCKET}/ring-v2-shadow/article/$(date -u +%Y-%m-%d)/decisions.json"
             ;;
           acceptance)
             # 軸一 B：conformal 定論驗收，從 replica 撈乾淨 held-out ham 打 staging endpoint
@@ -81,7 +83,26 @@ phases:
             #    AUTO_FREEZE（SPEC_RING_V2 F3b）由 CodeBuild 環境變數控制，預設不設＝影子/人工一鍵。
             CONTENT_TYPE=moment DAYS="${DAYS:-30}" MIN_AUTHORS="${MIN_AUTHORS:-3}" NEW_ACCOUNT_DAYS="${NEW_ACCOUNT_DAYS:-30}" \
               SINGLE_AUTHOR_MIN_POSTS="${SINGLE_AUTHOR_MIN_POSTS:-3}" \
+              SHADOW_REPORT_OUT=/tmp/moment_ring_v2_shadow.json \
               python scripts/ring_detect_job.py
+            aws s3 cp /tmp/moment_ring_v2_shadow.json "s3://${BUCKET}/ring-v2-shadow/moment/$(date -u +%Y-%m-%d)/decisions.json"
+            ;;
+          ring-shadow-v2)
+            # 精修後唯讀影子：純圖過濾、驗證成員交集、實體合併皆完成，不 upsert、不凍結。
+            DRY_RUN=1 SHADOW_REPORT_OUT=/tmp/article_ring_v2_shadow.json \
+              DAYS="${DAYS:-30}" MIN_AUTHORS="${MIN_AUTHORS:-3}" \
+              NEW_ACCOUNT_DAYS="${NEW_ACCOUNT_DAYS:-30}" \
+              SINGLE_AUTHOR_MIN_POSTS="${SINGLE_AUTHOR_MIN_POSTS:-3}" \
+              python scripts/ring_detect_job.py
+            aws s3 cp /tmp/article_ring_v2_shadow.json "s3://${BUCKET}/ring-v2-shadow/article/$(date -u +%Y-%m-%d)/decisions.json"
+            ;;
+          moment-ring-shadow-v2)
+            CONTENT_TYPE=moment DRY_RUN=1 SHADOW_REPORT_OUT=/tmp/moment_ring_v2_shadow.json \
+              DAYS="${DAYS:-30}" MIN_AUTHORS="${MIN_AUTHORS:-3}" \
+              NEW_ACCOUNT_DAYS="${NEW_ACCOUNT_DAYS:-30}" \
+              SINGLE_AUTHOR_MIN_POSTS="${SINGLE_AUTHOR_MIN_POSTS:-3}" \
+              python scripts/ring_detect_job.py
+            aws s3 cp /tmp/moment_ring_v2_shadow.json "s3://${BUCKET}/ring-v2-shadow/moment/$(date -u +%Y-%m-%d)/decisions.json"
             ;;
           ring-incremental)
             # 軸一 D 增量版（SPEC_RING_V2）：S3 滾動指紋狀態，只掃水位線後新貼文，

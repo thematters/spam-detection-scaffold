@@ -11,6 +11,7 @@ from ring_detect_job import (  # noqa: E402
     assemble_signals,
     auto_freeze,
     auto_freeze_eligible,
+    build_shadow_report,
     build_candidate,
     filter_empty_members,
     _severity_of,
@@ -303,8 +304,8 @@ def test_auto_freeze_eligible_double_key():
                 "signals": {"botUsernameRatio": bot}}
     # 雙鑰成立：跨 3 帳號（F1b 門檻）＋新帳號比高
     assert auto_freeze_eligible(cand(3, 0.9, 0.0))
-    # 雙鑰成立：亂碼比高
-    assert auto_freeze_eligible(cand(5, 0.5, 0.6))
+    # 亂碼帳號名只供人工參考，不得單獨取得凍結資格
+    assert not auto_freeze_eligible(cand(5, 0.5, 1.0))
     # 鑰1 不足（單帳號 F1a 候選天然不合格）
     assert not auto_freeze_eligible(cand(1, 1.0, 1.0))
     assert not auto_freeze_eligible(cand(2, 1.0, 1.0))
@@ -314,6 +315,44 @@ def test_auto_freeze_eligible_double_key():
     assert not auto_freeze_eligible(cand(10, 0.5, 0.1))
     # 資料缺席即否決
     assert not auto_freeze_eligible(cand(10, None, 0.9))
+
+
+def test_article_fingerprint_uses_body_not_title():
+    row = {"template_fam": "coarse", "n_articles": 3, "n_authors": 3,
+           "new_account_ratio": 1.0, "author_ids": [1, 2, 3]}
+    items_a = [{"content": "標題甲 相同正文", "fingerprint_content": "相同正文",
+                "author": "a"}]
+    items_b = [{"content": "完全不同標題 相同正文", "fingerprint_content": "相同正文",
+                "author": "b"}]
+    assert build_candidate(row, items_a)["fingerprint"] == build_candidate(
+        row, items_b
+    )["fingerprint"]
+
+
+def test_shadow_report_uses_verified_member_intersection_and_full_gates():
+    cfg = {"high_authors": 3, "new_ratio_hi": 0.8,
+           "bot_ratio_hi": 0.5, "old_exempt_ratio": 0.34}
+    candidate = {
+        "fingerprint": "fp",
+        "memberUserIds": ["1", "2", "3"],
+        "_verifiedMemberIds": ["2", "3", "outside"],
+        "_verifiedMembers": [
+            {"id": "2", "userName": "u2"},
+            {"id": "3", "userName": "u3"},
+            {"id": "outside", "userName": "not-a-member"},
+        ],
+        "nArticles": 3,
+        "nAuthors": 3,
+        "newAccountRatio": 1.0,
+        "signals": {"botUsernameRatio": 1.0, "nearDupRingSize": 3,
+                    "entityRingSize": 0, "sampleTexts": ["same"]},
+    }
+    report = build_shadow_report([candidate], content_type="article", cfg=cfg)
+    decision = report["decisions"][0]
+    assert report["mode"] == "SHADOW_V2_POST_REFINEMENT_READ_ONLY"
+    assert decision["action"] == "REVIEW_UNVERIFIED"
+    assert [m["id"] for m in decision["verifiedMembers"]] == ["2", "3"]
+    assert report["summary"]["autoFreezeEligibleAccounts"] == 0
 
 
 def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
@@ -333,6 +372,7 @@ def test_auto_freeze_only_touches_pending_and_survives_errors(monkeypatch=None):
         def cand(fp, **over):
             base = {"fingerprint": fp, "nAuthors": 5, "newAccountRatio": 1.0,
                     "signals": {"botUsernameRatio": 0.6},
+                    "memberUserIds": ["11", "12", "13", "14", "15"],
                     "_verifiedMemberIds": ["11", "12", "13", "14", "15"]}
             base.update(over)
             return base
@@ -408,7 +448,15 @@ def test_load_sql_substitutes_single_author_min_posts():
 def test_content_queries_carry_is_new_account_flag():
     for spec in CONTENT_TYPES.values():
         assert "is_new_account" in spec["content_query"]
+        assert "fingerprint_content" in spec["content_query"]
         assert "%(new_account_days)s" in spec["content_query"]
+
+
+def test_article_sql_groups_by_body_without_title():
+    sql = CONTENT_TYPES["article"]["sql"].read_text()
+    fingerprint_expr = sql.split("AS template_fam", 1)[0]
+    assert "coalesce(ac.content,'')" in fingerprint_expr
+    assert "av.title" not in fingerprint_expr
 
 
 if __name__ == "__main__":

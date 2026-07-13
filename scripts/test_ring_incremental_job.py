@@ -37,6 +37,15 @@ def test_to_state_row_drops_empty_content_posts():
     assert r["created_at"].startswith("2026-07-04")
 
 
+def test_to_state_row_prefers_body_fingerprint_over_article_title():
+    common = {"id": 1, "author_id": 2, "author_name": "a",
+              "user_created_at": None, "created_at": None,
+              "fingerprint_content": "相同正文"}
+    a = to_state_row({**common, "content": "標題甲 相同正文"})
+    b = to_state_row({**common, "content": "不同標題 相同正文"})
+    assert a["fp"] == b["fp"]
+
+
 def test_watermark_bootstrap_and_normal():
     # 冷啟動：狀態空 → 只回看 bootstrap 窗
     wm = watermark_of([], bootstrap_hours=24, now=NOW)
