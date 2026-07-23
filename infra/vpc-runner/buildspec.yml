@@ -26,6 +26,7 @@ phases:
     commands:
       - echo "JOB=$JOB  (連線走 in-VPC replica，DSN/salt 來自 SSM，不落地不印出)"
       - |
+        set -e
         case "$JOB" in
           ring)
             # 軸一 D：文章層 ring 偵測。
@@ -44,8 +45,11 @@ phases:
             DAYS="${DAYS:-30}" MIN_AUTHORS="${MIN_AUTHORS:-3}" NEW_ACCOUNT_DAYS="${NEW_ACCOUNT_DAYS:-30}" \
               SINGLE_AUTHOR_MIN_POSTS="${SINGLE_AUTHOR_MIN_POSTS:-3}" \
               SHADOW_REPORT_OUT=/tmp/article_ring_v2_shadow.json \
-              python scripts/ring_detect_job.py
+              python scripts/ring_detect_job.py || detect_status=$?
             aws s3 cp /tmp/article_ring_v2_shadow.json "s3://${BUCKET}/ring-v2-shadow/article/$(date -u +%Y-%m-%d)/decisions.json"
+            if [ "${detect_status:-0}" -ne 0 ]; then
+              exit "$detect_status"
+            fi
             ;;
           acceptance)
             # 軸一 B：conformal 定論驗收，從 replica 撈乾淨 held-out ham 打 staging endpoint
@@ -84,8 +88,11 @@ phases:
             CONTENT_TYPE=moment DAYS="${DAYS:-30}" MIN_AUTHORS="${MIN_AUTHORS:-3}" NEW_ACCOUNT_DAYS="${NEW_ACCOUNT_DAYS:-30}" \
               SINGLE_AUTHOR_MIN_POSTS="${SINGLE_AUTHOR_MIN_POSTS:-3}" \
               SHADOW_REPORT_OUT=/tmp/moment_ring_v2_shadow.json \
-              python scripts/ring_detect_job.py
+              python scripts/ring_detect_job.py || detect_status=$?
             aws s3 cp /tmp/moment_ring_v2_shadow.json "s3://${BUCKET}/ring-v2-shadow/moment/$(date -u +%Y-%m-%d)/decisions.json"
+            if [ "${detect_status:-0}" -ne 0 ]; then
+              exit "$detect_status"
+            fi
             ;;
           ring-shadow-v2)
             # 精修後唯讀影子：純圖過濾、驗證成員交集、實體合併皆完成，不 upsert、不凍結。
@@ -160,7 +167,7 @@ phases:
         esac
   post_build:
     commands:
-      - echo "done JOB=$JOB"
+      - echo "post-build reached for JOB=$JOB; use the CodeBuild status as the outcome"
 
 artifacts:
   files:
