@@ -167,7 +167,7 @@ phases:
         esac
   post_build:
     commands:
-      - echo "done JOB=$JOB"
+      - echo "post-build reached for JOB=$JOB; use the CodeBuild status as the outcome"
 
 artifacts:
   files:
